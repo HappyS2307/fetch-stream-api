@@ -1,594 +1,1391 @@
-const axios = require("axios");
-const cheerio = require("cheerio");
+const express = require('express');
+const axios = require('axios');
+const cheerio = require('cheerio');
+const dramaworld = require('./dramaworld');
 
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(express.json());
+
+// ==========================================
+// TARGET DOMAINS
+// ==========================================
+
+const ANIMESALT_BASE = "https://animesalt.ac";
+const TOONSTREAM_BASE = "https://toon-stream.site";
 const DRAMAWORLD_BASE = "https://dramaworld.site";
 
-const REQUEST_HEADERS = {
-    "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+const TMDB_API_KEY =
+    process.env.TMDB_API_KEY ||
+    "ed9311c3613b06f414be99abaec5dd86";
 
-    "Accept":
-        "text/html,application/xhtml+xml,application/xml;q=0.9," +
-        "image/avif,image/webp,*/*;q=0.8",
+// ==========================================
+// GLOBAL REQUEST HEADERS
+// ==========================================
 
-    "Accept-Language":
-        "en-US,en;q=0.9",
+const getHeaders = (refererUrl) => ({
+    'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+        'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+        'Chrome/124.0.0.0 Safari/537.36',
 
-    "Referer":
-        `${DRAMAWORLD_BASE}/`
+    'Accept':
+        'text/html,application/xhtml+xml,application/xml;q=0.9,' +
+        'image/avif,image/webp,*/*;q=0.8',
+
+    'Accept-Language':
+        'en-US,en;q=0.9',
+
+    'Referer':
+        refererUrl || 'https://google.com'
+});
+
+// ==========================================
+// URL SANITIZER
+// ==========================================
+
+const fixUrl = (url) => {
+    if (!url) return url;
+
+    let cleanUrl = url.trim();
+
+    if (
+        !cleanUrl.endsWith('/') &&
+        !cleanUrl.includes('?')
+    ) {
+        cleanUrl += '/';
+    }
+
+    return cleanUrl;
 };
 
-function absoluteUrl(url, base = DRAMAWORLD_BASE) {
-    if (!url) return null;
+// ==========================================
+// ERROR HANDLER
+// ==========================================
+
+const handleScraperError = (
+    res,
+    err,
+    contextMessage
+) => {
+
+    const statusCode =
+        err.response
+            ? err.response.status
+            : 500;
+
+    let message =
+        contextMessage;
+
+    if (statusCode === 404) {
+        message =
+            "Target resource or page not found";
+    }
+
+    if (statusCode === 403) {
+        message =
+            "Access blocked by target server (Cloudflare / WAF)";
+    }
+
+    return res
+        .status(statusCode)
+        .json({
+            error: message,
+            upstream_status: statusCode,
+            details: err.message
+        });
+};
+
+// ==========================================
+// TYPE DETECTOR
+// ==========================================
+
+const detectType = (
+    link,
+    classText
+) => {
+
+    if (
+        link &&
+        link.includes('/movies/')
+    ) {
+        return 'movie';
+    }
+
+    if (
+        classText &&
+        classText.includes('type-movies')
+    ) {
+        return 'movie';
+    }
+
+    return 'series';
+};
+
+// ==========================================
+// ANIMESALT SEARCH
+// ==========================================
+
+const searchAnimeSalt = async (query) => {
 
     try {
-        return new URL(url, base).href;
+
+        const { data } =
+            await axios.get(
+                `${ANIMESALT_BASE}/?s=${encodeURIComponent(query)}`,
+                {
+                    headers:
+                        getHeaders(ANIMESALT_BASE),
+                    maxRedirects: 5
+                }
+            );
+
+        const $ =
+            cheerio.load(data);
+
+        const results = [];
+
+        $('ul.post-lst li').each(
+            (index, element) => {
+
+                const classText =
+                    $(element)
+                        .attr('class') || '';
+
+                const title =
+                    $(element)
+                        .find('h2.entry-title')
+                        .text()
+                        .trim();
+
+                let link =
+                    $(element)
+                        .find('a.lnk-blk')
+                        .attr('href');
+
+                let image =
+                    $(element)
+                        .find('img')
+                        .attr('data-src') ||
+                    $(element)
+                        .find('img')
+                        .attr('src');
+
+                if (
+                    image &&
+                    image.startsWith('//')
+                ) {
+                    image =
+                        'https:' + image;
+                }
+
+                if (link) {
+
+                    if (
+                        !link.startsWith('http')
+                    ) {
+                        link =
+                            `${ANIMESALT_BASE}${link}`;
+                    }
+
+                    link =
+                        fixUrl(link);
+                }
+
+                const type =
+                    detectType(
+                        link,
+                        classText
+                    );
+
+                if (title && link) {
+
+                    results.push({
+                        title,
+                        link,
+                        image,
+                        type,
+                        source: 'AnimeSalt'
+                    });
+                }
+            }
+        );
+
+        return results;
+
     } catch {
-        return null;
-    }
-}
 
-function cleanText(text) {
-    return String(text || "")
-        .replace(/\s+/g, " ")
-        .trim();
-}
-
-async function fetchPage(url) {
-    const response = await axios.get(url, {
-        headers: REQUEST_HEADERS,
-        timeout: 15000,
-        maxRedirects: 5,
-        validateStatus: status =>
-            status >= 200 && status < 400
-    });
-
-    return {
-        html: response.data,
-        finalUrl: response.request?.res?.responseUrl || url
-    };
-}
-
-/*
- * DramaWorld's player token is a URL-safe/base64 JSON object.
- *
- * We ONLY decode the publicly exposed token.
- * We do not forge signatures, modify expiry values,
- * or bypass protected media.
- */
-function decodePublicPlayerToken(token) {
-    if (!token) return null;
-
-    try {
-        let value = String(token).trim();
-
-        // Base64URL -> normal Base64
-        value = value
-            .replace(/-/g, "+")
-            .replace(/_/g, "/");
-
-        while (value.length % 4 !== 0) {
-            value += "=";
-        }
-
-        const decoded =
-            Buffer.from(value, "base64")
-                .toString("utf8");
-
-        const parsed = JSON.parse(decoded);
-
-        return {
-            url: parsed.u || null,
-            expires: parsed.e || null,
-            signature: parsed.s || null,
-            label: parsed.l || null,
-            type: parsed.t || null
-        };
-
-    } catch {
-        return null;
-    }
-}
-
-function extractPlayerTokenFromEmbed(embedUrl) {
-    if (!embedUrl) return null;
-
-    const marker = "/stream/embed/";
-
-    const index =
-        embedUrl.indexOf(marker);
-
-    if (index === -1) {
-        return null;
-    }
-
-    return embedUrl
-        .slice(index + marker.length)
-        .split("?")[0]
-        .split("#")[0]
-        .trim();
-}
-
-function buildPublicStream(embedUrl, serverName) {
-    const token =
-        extractPlayerTokenFromEmbed(embedUrl);
-
-    const decoded =
-        decodePublicPlayerToken(token);
-
-    return {
-        server:
-            serverName || "Online Watch",
-
-        type:
-            "stream",
-
-        embed_url:
-            embedUrl,
-
-        // This is the URL explicitly encoded
-        // inside DramaWorld's public player token.
-        stream_url:
-            decoded?.url || embedUrl,
-
-        expires:
-            decoded?.expires || null,
-
-        token:
-            token || null
-    };
-}
-// ============================================================
-// SEARCH
-// ============================================================
-
-async function search(query) {
-    if (!query || !String(query).trim()) {
         return [];
     }
+};
 
-    const q =
-        String(query).trim();
+// ==========================================
+// TOONSTREAM SEARCH
+// ==========================================
 
-    const searchUrl =
-        `${DRAMAWORLD_BASE}/?s=${encodeURIComponent(q)}`;
+const searchToonStream = async (query) => {
 
-    const { html } =
-        await fetchPage(searchUrl);
+    try {
 
-    const $ =
-        cheerio.load(html);
-
-    const results = [];
-    const seen = new Set();
-
-    /*
-     * DramaWorld uses /drama/<slug> for show pages.
-     * We intentionally ignore /watch/ links here so
-     * search returns the series/movie itself.
-     */
-
-    $("a[href]").each((index, element) => {
-
-        const href =
-            absoluteUrl(
-                $(element).attr("href")
+        const { data } =
+            await axios.get(
+                `${TOONSTREAM_BASE}/s?q=${encodeURIComponent(query)}`,
+                {
+                    headers:
+                        getHeaders(TOONSTREAM_BASE),
+                    maxRedirects: 5
+                }
             );
 
-        if (!href) return;
+        const $ =
+            cheerio.load(data);
 
-        const url =
-            new URL(href);
+        const results = [];
 
-        if (
-            url.hostname !==
-            new URL(DRAMAWORLD_BASE).hostname
-        ) {
-            return;
-        }
+        $('ul.post-lst li').each(
+            (index, element) => {
 
-        if (!url.pathname.startsWith("/drama/")) {
-            return;
-        }
+                const classText =
+                    $(element)
+                        .attr('class') || '';
 
-        const title =
-            cleanText(
-                $(element).text()
-            );
+                const title =
+                    $(element)
+                        .find('h2.entry-title')
+                        .text()
+                        .trim();
 
-        if (!title) return;
+                let link =
+                    $(element)
+                        .find('a.lnk-blk')
+                        .attr('href');
 
-        if (seen.has(href)) return;
+                let image =
+                    $(element)
+                        .find('img')
+                        .attr('data-src') ||
+                    $(element)
+                        .find('img')
+                        .attr('src');
 
-        seen.add(href);
+                if (
+                    image &&
+                    image.startsWith('//')
+                ) {
+                    image =
+                        'https:' + image;
+                }
 
-        let image =
-            $(element)
-                .find("img")
-                .first()
-                .attr("src") ||
-            $(element)
-                .find("img")
-                .first()
-                .attr("data-src");
+                if (link) {
 
-        image =
-            absoluteUrl(image);
+                    if (
+                        !link.startsWith('http')
+                    ) {
+                        link =
+                            `${TOONSTREAM_BASE}${
+                                link.startsWith('/')
+                                    ? ''
+                                    : '/'
+                            }${link}`;
+                    }
 
-        results.push({
-            title,
-            link: href,
-            image,
-            source: "DramaWorld"
-        });
-    });
+                    link =
+                        fixUrl(link);
+                }
 
-    return results.slice(0, 30);
-}
+                const type =
+                    detectType(
+                        link,
+                        classText
+                    );
 
-// ============================================================
-// EPISODES
-// ============================================================
+                if (title && link) {
 
-async function episodes(seriesUrl) {
-
-    const pageUrl =
-        absoluteUrl(seriesUrl);
-
-    if (!pageUrl) {
-        throw new Error(
-            "Invalid DramaWorld series URL"
+                    results.push({
+                        title,
+                        link,
+                        image,
+                        type,
+                        source: 'ToonStream'
+                    });
+                }
+            }
         );
+
+        return results;
+
+    } catch {
+
+        return [];
+    }
+};
+
+// ==========================================
+// TOONSTREAM EMBED RESOLVER
+// ==========================================
+
+const resolveEmbedUrl = async (
+    embedUrl
+) => {
+
+    try {
+
+        const { data } =
+            await axios.get(
+                embedUrl,
+                {
+                    headers:
+                        getHeaders(TOONSTREAM_BASE),
+                    timeout: 3000,
+                    maxRedirects: 5
+                }
+            );
+
+        const $ =
+            cheerio.load(data);
+
+        const nestedIframe =
+            $('iframe').attr('src') ||
+            $('iframe').attr('data-src');
+
+        if (nestedIframe) {
+            return nestedIframe;
+        }
+
+        let directVideoUrl = null;
+
+        $('script').each(
+            (i, el) => {
+
+                const scriptContent =
+                    $(el).html();
+
+                if (!scriptContent) {
+                    return;
+                }
+
+                const m3u8Match =
+                    scriptContent.match(
+                        /(https?:\/\/[^\s"'`]+\.m3u8[^\s"'`]*)/i
+                    );
+
+                const mp4Match =
+                    scriptContent.match(
+                        /(https?:\/\/[^\s"'`]+\.mp4[^\s"'`]*)/i
+                    );
+
+                if (m3u8Match) {
+
+                    directVideoUrl =
+                        m3u8Match[1]
+                            .replace(/\\/g, '');
+
+                } else if (mp4Match) {
+
+                    directVideoUrl =
+                        mp4Match[1]
+                            .replace(/\\/g, '');
+                }
+            }
+        );
+
+        return (
+            directVideoUrl ||
+            embedUrl
+        );
+
+    } catch {
+
+        return embedUrl;
+    }
+};
+
+// ==========================================
+// HOME
+// ==========================================
+
+app.get('/', (req, res) => {
+
+    res.json({
+        status: "Active",
+
+        message:
+            "FetchStream Scraper API is running.",
+
+        sources: [
+            "AnimeSalt",
+            "ToonStream",
+            "DramaWorld"
+        ]
+    });
+});
+
+// ==========================================
+// COMBINED SEARCH
+// ==========================================
+
+app.get('/search', async (req, res) => {
+
+    const query =
+        req.query.q;
+
+    if (!query) {
+
+        return res
+            .status(400)
+            .json({
+                error:
+                    "Query parameter 'q' is required"
+            });
     }
 
-    const { html } =
-        await fetchPage(pageUrl);
+    const [
+        saltResults,
+        toonResults,
+        dramaResults
+    ] = await Promise.all([
+        searchAnimeSalt(query),
+        searchToonStream(query),
+        dramaworld.search(query)
+            .catch(() => [])
+    ]);
+
+    res.json({
+
+        query,
+
+        total:
+            saltResults.length +
+            toonResults.length +
+            dramaResults.length,
+
+        results: [
+            ...saltResults,
+            ...toonResults,
+            ...dramaResults
+        ]
+    });
+});
+// ==========================================
+// ANIMESALT EPISODES
+// ==========================================
+
+const getAnimeSaltEpisodes = async (url) => {
+
+    const { data } =
+        await axios.get(
+            url,
+            {
+                headers:
+                    getHeaders(ANIMESALT_BASE),
+                maxRedirects: 5
+            }
+        );
 
     const $ =
-        cheerio.load(html);
+        cheerio.load(data);
 
-    const results = [];
-    const seen = new Set();
+    const episodes = [];
 
-    /*
-     * Actual DramaWorld HTML contains:
-     *
-     * /watch/my-bias-my-boss-episode-10
-     * /watch/my-bias-my-boss-episode-9
-     * ...
-     *
-     * in both mobile and sidebar episode lists.
-     */
-
-    $('a[href*="/watch/"]').each(
+    $('ul.eplister li').each(
         (index, element) => {
 
             const link =
-                absoluteUrl(
-                    $(element).attr("href")
-                );
+                $(element)
+                    .find('a')
+                    .attr('href');
 
-            if (!link) return;
+            const number =
+                $(element)
+                    .find('.epl-num')
+                    .text()
+                    .trim();
 
-            if (seen.has(link)) return;
+            const title =
+                $(element)
+                    .find('.epl-title')
+                    .text()
+                    .trim();
 
-            seen.add(link);
+            if (link) {
 
-            const text =
-                cleanText(
-                    $(element).text()
-                );
+                episodes.push({
+                    epNum:
+                        Number(number) ||
+                        index + 1,
 
-            const match =
-                link.match(
-                    /episode[-_ ]?(\d+)/i
-                );
+                    title:
+                        title ||
+                        `Episode ${number || index + 1}`,
 
-            const epNum =
-                match
-                    ? Number(match[1])
-                    : index + 1;
+                    link:
+                        link.startsWith('http')
+                            ? link
+                            : `${ANIMESALT_BASE}${link}`,
 
-            results.push({
-                epNum,
-                title:
-                    text ||
-                    `Episode ${epNum}`,
-
-                link,
-
-                source:
-                    "DramaWorld"
-            });
+                    source:
+                        'AnimeSalt'
+                });
+            }
         }
     );
 
-    /*
-     * If the supplied URL itself is an episode page
-     * and no episode list was detected, return it.
-     */
+    return episodes;
+};
 
-    if (
-        results.length === 0 &&
-        pageUrl.includes("/watch/")
-    ) {
 
-        const match =
-            pageUrl.match(
-                /episode[-_ ]?(\d+)/i
-            );
+// ==========================================
+// TOONSTREAM EPISODES
+// ==========================================
 
-        const epNum =
-            match
-                ? Number(match[1])
-                : 1;
+const getToonStreamEpisodes = async (
+    url
+) => {
 
-        results.push({
-            epNum,
-
-            title:
-                cleanText(
-                    $("h2.wic-title, h1, h2")
-                        .first()
-                        .text()
-                ) ||
-                `Episode ${epNum}`,
-
-            link:
-                pageUrl,
-
-            source:
-                "DramaWorld"
-        });
-    }
-
-    results.sort(
-        (a, b) =>
-            Number(a.epNum) -
-            Number(b.epNum)
-    );
-
-    return results;
-}
-
-// ============================================================
-// STREAMS
-// ============================================================
-
-async function streams(episodeUrl) {
-
-    const pageUrl =
-        absoluteUrl(episodeUrl);
-
-    if (!pageUrl) {
-        throw new Error(
-            "Invalid DramaWorld episode URL"
+    const { data } =
+        await axios.get(
+            url,
+            {
+                headers:
+                    getHeaders(TOONSTREAM_BASE),
+                maxRedirects: 5
+            }
         );
-    }
-
-    const { html } =
-        await fetchPage(pageUrl);
 
     const $ =
-        cheerio.load(html);
+        cheerio.load(data);
 
-    const streamsList = [];
-    const seen = new Set();
+    const episodes = [];
 
-    const title =
-        cleanText(
-            $("h2.wic-title")
-                .first()
-                .text()
-        ) ||
-        cleanText(
-            $("h1")
-                .first()
-                .text()
+    $('ul.eplister li').each(
+        (index, element) => {
+
+            const link =
+                $(element)
+                    .find('a')
+                    .attr('href');
+
+            const number =
+                $(element)
+                    .find('.epl-num')
+                    .text()
+                    .trim();
+
+            const title =
+                $(element)
+                    .find('.epl-title')
+                    .text()
+                    .trim();
+
+            if (link) {
+
+                episodes.push({
+                    epNum:
+                        Number(number) ||
+                        index + 1,
+
+                    title:
+                        title ||
+                        `Episode ${number || index + 1}`,
+
+                    link:
+                        link.startsWith('http')
+                            ? link
+                            : `${TOONSTREAM_BASE}${link}`,
+
+                    source:
+                        'ToonStream'
+                });
+            }
+        }
+    );
+
+    return episodes;
+};
+
+
+// ==========================================
+// ANIMESALT STREAMS
+// ==========================================
+
+const getAnimeSaltStreams = async (
+    episodeUrl
+) => {
+
+    const { data } =
+        await axios.get(
+            episodeUrl,
+            {
+                headers:
+                    getHeaders(ANIMESALT_BASE),
+                maxRedirects: 5
+            }
         );
 
-    const seriesTitle =
-        cleanText(
-            $(".wic-series-link")
-                .first()
-                .text()
-        );
+    const $ =
+        cheerio.load(data);
 
-    let poster =
-        $('meta[property="og:image"]')
-            .attr("content") ||
+    const streams = [];
 
-        $('meta[name="twitter:image"]')
-            .attr("content");
-
-    poster =
-        absoluteUrl(
-            poster,
-            pageUrl
-        );
-
-    /*
-     * Actual source:
-     *
-     * <iframe src="/stream/embed/TOKEN">
-     *
-     * We extract this publicly exposed iframe.
-     */
-
-    $("iframe").each(
+    $('iframe').each(
         (index, element) => {
 
             let src =
-                $(element).attr("src") ||
-                $(element).attr("data-src");
-
-            if (!src) return;
-
-            src =
-                absoluteUrl(
-                    src,
-                    pageUrl
-                );
+                $(element).attr('src') ||
+                $(element).attr('data-src');
 
             if (!src) return;
 
             if (
-                !src.includes(
-                    "/stream/embed/"
-                )
+                src.startsWith('//')
             ) {
-                return;
+                src =
+                    'https:' + src;
             }
 
-            if (seen.has(src)) return;
+            if (
+                !src.startsWith('http')
+            ) {
+                src =
+                    `${ANIMESALT_BASE}${src}`;
+            }
 
-            seen.add(src);
+            streams.push({
+                server:
+                    `Server ${index + 1}`,
 
-            streamsList.push(
-                buildPublicStream(
-                    src,
-                    "Online Watch"
-                )
-            );
+                type:
+                    'embed',
+
+                link:
+                    src
+            });
         }
     );
 
-    /*
-     * Also inspect server buttons.
-     *
-     * DramaWorld explicitly stores the same player
-     * token in:
-     *
-     * data-token="..."
-     *
-     * and switchServer() builds:
-     *
-     * /stream/embed/ + token
-     */
+    return streams;
+};
 
-    $(".server-btn").each(
+
+// ==========================================
+// TOONSTREAM STREAMS
+// ==========================================
+
+const getToonStreamStreams = async (
+    episodeUrl
+) => {
+
+    const { data } =
+        await axios.get(
+            episodeUrl,
+            {
+                headers:
+                    getHeaders(TOONSTREAM_BASE),
+                maxRedirects: 5
+            }
+        );
+
+    const $ =
+        cheerio.load(data);
+
+    const streams = [];
+
+    $('iframe').each(
         (index, element) => {
 
-            const token =
-                $(element)
-                    .attr("data-token");
+            let src =
+                $(element).attr('src') ||
+                $(element).attr('data-src');
 
-            if (!token) return;
+            if (!src) return;
 
-            const serverName =
-                cleanText(
-                    $(element).text()
-                ) ||
-                `Server ${index + 1}`;
+            if (
+                src.startsWith('//')
+            ) {
+                src =
+                    'https:' + src;
+            }
 
-            const embedUrl =
-                `${DRAMAWORLD_BASE}/stream/embed/${token}`;
+            if (
+                !src.startsWith('http')
+            ) {
+                src =
+                    `${TOONSTREAM_BASE}${src}`;
+            }
 
-            if (seen.has(embedUrl)) return;
+            streams.push({
+                server:
+                    `Server ${index + 1}`,
 
-            seen.add(embedUrl);
+                type:
+                    'embed',
 
-            streamsList.push(
-                buildPublicStream(
-                    embedUrl,
-                    serverName
-                )
-            );
+                link:
+                    src
+            });
         }
     );
-      /*
-     * Remove duplicate stream URLs while preserving order.
-     */
 
-    const uniqueStreams = [];
+    return streams;
+};
 
-    const streamSeen =
-        new Set();
 
-    for (const stream of streamsList) {
+// ==========================================
+// DRAMAWORLD SEARCH
+// ==========================================
 
-        const key =
-            stream.stream_url ||
-            stream.embed_url;
+app.get(
+    '/dramaworld/search',
+    async (req, res) => {
 
-        if (!key) continue;
+        const query =
+            req.query.q;
 
-        if (streamSeen.has(key)) {
-            continue;
+        if (!query) {
+
+            return res
+                .status(400)
+                .json({
+                    error:
+                        "Query parameter 'q' is required"
+                });
         }
 
-        streamSeen.add(key);
+        try {
 
-        uniqueStreams.push(stream);
+            const results =
+                await dramaworld.search(query);
+
+            res.json({
+
+                source:
+                    'DramaWorld',
+
+                query,
+
+                total:
+                    results.length,
+
+                results
+            });
+
+        } catch (err) {
+
+            handleScraperError(
+                res,
+                err,
+                'DramaWorld search failed'
+            );
+        }
     }
+);
 
-    return {
-        title:
-            title || null,
 
-        series:
-            seriesTitle || null,
+// ==========================================
+// DRAMAWORLD EPISODES
+// ==========================================
 
-        episode_url:
-            pageUrl,
+app.get(
+    '/dramaworld/episodes',
+    async (req, res) => {
 
-        poster_image:
-            poster || null,
+        const url =
+            req.query.url;
 
-        streams:
-            uniqueStreams,
+        if (!url) {
 
-        source:
-            "DramaWorld"
-    };
-}
+            return res
+                .status(400)
+                .json({
+                    error:
+                        "Query parameter 'url' is required"
+                });
+        }
 
-// ============================================================
-// ERROR-SAFE WRAPPERS
-// ============================================================
+        try {
 
-async function safeSearch(query) {
-    try {
-        return await search(query);
-    } catch (error) {
+            const episodes =
+                await dramaworld.episodes(url);
+
+            res.json({
+
+                source:
+                    'DramaWorld',
+
+                total:
+                    episodes.length,
+
+                episodes
+            });
+
+        } catch (err) {
+
+            handleScraperError(
+                res,
+                err,
+                'DramaWorld episodes failed'
+            );
+        }
+    }
+);
+
+
+// ==========================================
+// DRAMAWORLD STREAMS
+// ==========================================
+
+app.get(
+    '/dramaworld/streams',
+    async (req, res) => {
+
+        const url =
+            req.query.url;
+
+        if (!url) {
+
+            return res
+                .status(400)
+                .json({
+                    error:
+                        "Query parameter 'url' is required"
+                });
+        }
+
+        try {
+
+            const result =
+                await dramaworld.streams(url);
+
+            res.json(result);
+
+        } catch (err) {
+
+            handleScraperError(
+                res,
+                err,
+                'DramaWorld streams failed'
+            );
+        }
+    }
+);
+
+
+// ==========================================
+// SOURCE-SPECIFIC EPISODES
+// ==========================================
+
+app.get(
+    '/animesalt/episodes',
+    async (req, res) => {
+
+        const url =
+            req.query.url;
+
+        if (!url) {
+
+            return res
+                .status(400)
+                .json({
+                    error:
+                        "Query parameter 'url' is required"
+                });
+        }
+
+        try {
+
+            const episodes =
+                await getAnimeSaltEpisodes(url);
+
+            res.json({
+                source:
+                    'AnimeSalt',
+
+                total:
+                    episodes.length,
+
+                episodes
+            });
+
+        } catch (err) {
+
+            handleScraperError(
+                res,
+                err,
+                'AnimeSalt episodes failed'
+            );
+        }
+    }
+);
+
+
+app.get(
+    '/toonstream/episodes',
+    async (req, res) => {
+
+        const url =
+            req.query.url;
+
+        if (!url) {
+
+            return res
+                .status(400)
+                .json({
+                    error:
+                        "Query parameter 'url' is required"
+                });
+        }
+
+        try {
+
+            const episodes =
+                await getToonStreamEpisodes(url);
+
+            res.json({
+                source:
+                    'ToonStream',
+
+                total:
+                    episodes.length,
+
+                episodes
+            });
+
+        } catch (err) {
+
+            handleScraperError(
+                res,
+                err,
+                'ToonStream episodes failed'
+            );
+        }
+    }
+);
+
+
+// ==========================================
+// SOURCE-SPECIFIC STREAMS
+// ==========================================
+
+app.get(
+    '/animesalt/streams',
+    async (req, res) => {
+
+        const url =
+            req.query.url;
+
+        if (!url) {
+
+            return res
+                .status(400)
+                .json({
+                    error:
+                        "Query parameter 'url' is required"
+                });
+        }
+
+        try {
+
+            const streams =
+                await getAnimeSaltStreams(url);
+
+            res.json({
+                source:
+                    'AnimeSalt',
+
+                total:
+                    streams.length,
+
+                streams
+            });
+
+        } catch (err) {
+
+            handleScraperError(
+                res,
+                err,
+                'AnimeSalt streams failed'
+            );
+        }
+    }
+);
+
+
+app.get(
+    '/toonstream/streams',
+    async (req, res) => {
+
+        const url =
+            req.query.url;
+
+        if (!url) {
+
+            return res
+                .status(400)
+                .json({
+                    error:
+                        "Query parameter 'url' is required"
+                });
+        }
+
+        try {
+
+            const streams =
+                await getToonStreamStreams(url);
+
+            res.json({
+                source:
+                    'ToonStream',
+
+                total:
+                    streams.length,
+
+                streams
+            });
+
+        } catch (err) {
+
+            handleScraperError(
+                res,
+                err,
+                'ToonStream streams failed'
+            );
+        }
+    }
+);
+// ==========================================
+// TMDB OFFICIAL METADATA SERVICE
+// ==========================================
+
+const tmdbRequest = async (
+    endpoint,
+    params = {}
+) => {
+
+    if (!TMDB_API_KEY) {
         throw new Error(
-            `DramaWorld search failed: ${error.message}`
+            "TMDB API key is not configured"
         );
     }
-}
 
-async function safeEpisodes(url) {
-    try {
-        return await episodes(url);
-    } catch (error) {
-        throw new Error(
-            `DramaWorld episodes failed: ${error.message}`
+    const response =
+        await axios.get(
+            `https://api.themoviedb.org/3${endpoint}`,
+            {
+                params: {
+                    api_key:
+                        TMDB_API_KEY,
+
+                    ...params
+                },
+
+                timeout: 10000
+            }
         );
-    }
-}
 
-async function safeStreams(url) {
-    try {
-        return await streams(url);
-    } catch (error) {
-        throw new Error(
-            `DramaWorld streams failed: ${error.message}`
-        );
-    }
-}
-
-// ============================================================
-// EXPORT
-// ============================================================
-
-module.exports = {
-    search: safeSearch,
-    episodes: safeEpisodes,
-    streams: safeStreams,
-
-    // Export helpers too, useful when connecting
-    // this module with index.js later.
-    decodePublicPlayerToken,
-    extractPlayerTokenFromEmbed
+    return response.data;
 };
+
+
+// ==========================================
+// TMDB SEARCH
+// ==========================================
+
+app.get(
+    '/tmdb/search',
+    async (req, res) => {
+
+        const query =
+            req.query.q;
+
+        if (!query) {
+
+            return res
+                .status(400)
+                .json({
+                    error:
+                        "Query parameter 'q' is required"
+                });
+        }
+
+        try {
+
+            const data =
+                await tmdbRequest(
+                    '/search/multi',
+                    {
+                        query,
+                        language:
+                            req.query.language ||
+                            'en-US',
+
+                        include_adult:
+                            false
+                    }
+                );
+
+            const results =
+                (data.results || [])
+                    .filter(
+                        item =>
+                            item.media_type ===
+                            'movie' ||
+                            item.media_type ===
+                            'tv'
+                    )
+                    .map(item => ({
+
+                        id:
+                            item.id,
+
+                        title:
+                            item.title ||
+                            item.name,
+
+                        original_title:
+                            item.original_title ||
+                            item.original_name,
+
+                        type:
+                            item.media_type,
+
+                        overview:
+                            item.overview || '',
+
+                        poster:
+                            item.poster_path
+                                ? `https://image.tmdb.org/t/p/w500${item.poster_path}`
+                                : null,
+
+                        backdrop:
+                            item.backdrop_path
+                                ? `https://image.tmdb.org/t/p/w1280${item.backdrop_path}`
+                                : null,
+
+                        release_date:
+                            item.release_date ||
+                            item.first_air_date ||
+                            null,
+
+                        rating:
+                            item.vote_average ||
+                            0
+                    }));
+
+            res.json({
+                query,
+                total:
+                    results.length,
+                results
+            });
+
+        } catch (err) {
+
+            handleScraperError(
+                res,
+                err,
+                'TMDB search failed'
+            );
+        }
+    }
+);
+
+
+// ==========================================
+// TMDB MOVIE DETAILS
+// ==========================================
+
+app.get(
+    '/tmdb/movie/:id',
+    async (req, res) => {
+
+        try {
+
+            const data =
+                await tmdbRequest(
+                    `/movie/${req.params.id}`,
+                    {
+                        language:
+                            req.query.language ||
+                            'en-US'
+                    }
+                );
+
+            res.json(data);
+
+        } catch (err) {
+
+            handleScraperError(
+                res,
+                err,
+                'TMDB movie request failed'
+            );
+        }
+    }
+);
+
+
+// ==========================================
+// TMDB TV DETAILS
+// ==========================================
+
+app.get(
+    '/tmdb/tv/:id',
+    async (req, res) => {
+
+        try {
+
+            const data =
+                await tmdbRequest(
+                    `/tv/${req.params.id}`,
+                    {
+                        language:
+                            req.query.language ||
+                            'en-US'
+                    }
+                );
+
+            res.json(data);
+
+        } catch (err) {
+
+            handleScraperError(
+                res,
+                err,
+                'TMDB TV request failed'
+            );
+        }
+    }
+);
+
+
+// ==========================================
+// TMDB TV EPISODE DETAILS
+// ==========================================
+
+app.get(
+    '/tmdb/tv/:id/season/:season/episode/:episode',
+    async (req, res) => {
+
+        try {
+
+            const {
+                id,
+                season,
+                episode
+            } = req.params;
+
+            const data =
+                await tmdbRequest(
+                    `/tv/${id}/season/${season}/episode/${episode}`,
+                    {
+                        language:
+                            req.query.language ||
+                            'en-US'
+                    }
+                );
+
+            res.json(data);
+
+        } catch (err) {
+
+            handleScraperError(
+                res,
+                err,
+                'TMDB episode request failed'
+            );
+        }
+    }
+);
+
+
+// ==========================================
+// HEALTH CHECK
+// ==========================================
+
+app.get(
+    '/health',
+    (req, res) => {
+
+        res.json({
+
+            status:
+                'ok',
+
+            service:
+                'FetchStream Scraper API',
+
+            sources: [
+                'AnimeSalt',
+                'ToonStream',
+                'DramaWorld'
+            ],
+
+            timestamp:
+                new Date().toISOString()
+        });
+    }
+);
+
+
+// ==========================================
+// 404 HANDLER
+// ==========================================
+
+app.use(
+    (req, res) => {
+
+        res.status(404).json({
+
+            error:
+                'Endpoint not found',
+
+            path:
+                req.originalUrl
+        });
+    }
+);
+
+
+// ==========================================
+// GLOBAL ERROR HANDLER
+// ==========================================
+
+app.use(
+    (err, req, res, next) => {
+
+        console.error(
+            'Unhandled error:',
+            err
+        );
+
+        if (res.headersSent) {
+            return next(err);
+        }
+
+        res.status(500).json({
+
+            error:
+                'Internal server error',
+
+            details:
+                err.message
+        });
+    }
+);
+
+
+// ==========================================
+// SERVER START
+// ==========================================
+
+app.listen(
+    PORT,
+    '0.0.0.0',
+    () => {
+
+        console.log(
+            `FetchStream API running on port ${PORT}`
+        );
+    }
+);
