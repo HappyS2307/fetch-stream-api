@@ -1797,6 +1797,143 @@ app.get('/toonstream/streams', async (req, res) => {
 
 
 /* =========================================
+   RAREANIMES DOM EPISODE PLAYER GROUPING
+   ========================================= */
+
+const extractRareAnimesEpisodePlayers = ($) => {
+    const links = [];
+
+    $('a[href]').each((index, element) => {
+        const href = String($(element).attr('href') || '').trim();
+        const label = $(element).text().replace(/\s+/g, ' ').trim();
+
+        if (!href || !label) return;
+
+        let absolute;
+        try {
+            absolute = new URL(href, RAREANIMES_BASE).href;
+        } catch {
+            return;
+        }
+
+        let parsed;
+        try {
+            parsed = new URL(absolute);
+        } catch {
+            return;
+        }
+
+        if (
+            parsed.hostname !== 'codedew.com' ||
+            !parsed.pathname.startsWith('/zipper/')
+        ) {
+            return;
+        }
+
+        const serverMatch =
+            label.match(/watch\s*multi\s*quality/i) ||
+            label.match(/hubcloud/i) ||
+            label.match(/watch\s*now/i) ||
+            label.match(/dlbeta/i);
+
+        if (!serverMatch) return;
+
+        let server = 'Player';
+        if (/watch\s*multi\s*quality/i.test(label)) server = 'Watch Quality';
+        else if (/hubcloud/i.test(label)) server = 'HubCloud';
+        else if (/watch\s*now/i.test(label)) server = 'WatchNow';
+        else if (/dlbeta/i.test(label)) server = 'DLBeta';
+
+        links.push({
+            index,
+            server,
+            link: absolute
+        });
+    });
+
+    if (!links.length) return [];
+
+    const findEpisodeNumber = (element) => {
+        let node = $(element);
+
+        for (let depth = 0; depth < 8 && node.length; depth++) {
+            const text = node.text().replace(/\s+/g, ' ').trim();
+
+            const match =
+                text.match(/(?:episode|ep)\s*[-#: ]?\s*(\d{1,4})/i) ||
+                text.match(/(?:e)\s*(\d{1,4})(?:\b|$)/i);
+
+            if (match) return Number(match[1]);
+
+            node = node.parent();
+        }
+
+        return null;
+    };
+
+    const rawGroups = [];
+    const used = new Set();
+
+    $('a[href]').each((index, element) => {
+        if (!links.some(item => item.index === index)) return;
+
+        const epNum = findEpisodeNumber(element);
+        if (epNum == null) return;
+
+        const key = String(epNum);
+        if (!rawGroups.some(group => group.epNum === epNum)) {
+            rawGroups.push({
+                epNum,
+                title: `Episode ${epNum}`,
+                streams: []
+            });
+        }
+
+        const group = rawGroups.find(item => item.epNum === epNum);
+        const link = links.find(item => item.index === index);
+
+        if (link && !used.has(link.link)) {
+            used.add(link.link);
+            group.streams.push({
+                server: link.server,
+                language: 'Default',
+                link: link.link,
+                type: 'player',
+                public: true
+            });
+        }
+    });
+
+    if (rawGroups.length) {
+        return rawGroups.sort((a, b) => a.epNum - b.epNum);
+    }
+
+    // Current RareAnimes pages expose repeated public server-link sets.
+    // When episode labels are not present in the DOM, preserve those public
+    // links and group them in their observed four-server sets.
+    const fallback = [];
+    const chunkSize = 4;
+
+    for (let i = 0; i < links.length; i += chunkSize) {
+        const chunk = links.slice(i, i + chunkSize);
+
+        fallback.push({
+            epNum: Math.floor(i / chunkSize) + 1,
+            title: `Episode ${Math.floor(i / chunkSize) + 1}`,
+            streams: chunk.map(item => ({
+                server: item.server,
+                language: 'Default',
+                link: item.link,
+                type: 'player',
+                public: true
+            }))
+        });
+    }
+
+    return fallback;
+};
+
+/* =========================================
    RAREANIMES SEARCH
    ========================================= */
 
