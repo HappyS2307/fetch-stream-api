@@ -1773,8 +1773,8 @@ app.get('/rareanimes/debug', async (req, res) => {
         const page = await fetchRareAnimesPage(rawUrl);
         const html = String(page.data || "");
         const markerIndex = html.indexOf("const relatedData");
-        const seaMatches = html.match(/"SEA_\\d+"/g) || [];
-        const iframeMatches = html.match(/https?:\\/\\/[^"'\\s<>]+/g) || [];
+        const seaMatches = html.match(/"SEA_\d+"/g) || [];
+        const iframeMatches = html.match(/https?:\/\/[^"\'\s<>]+/g) || [];
 
         res.json({
             success: true,
