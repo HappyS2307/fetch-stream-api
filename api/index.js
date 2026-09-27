@@ -674,18 +674,80 @@ const fetchRareAnimesPage = async (rawUrl) => {
 };
 
 const extractRareAnimesRelatedData = (html) => {
-    const match = String(html || "").match(
-        /const\s+relatedData\s*=\s*(\{[\s\S]*?\});\s*function\s+openRelatedModal/
-    );
+    const source = String(html || "");
 
-    if (!match) {
+    const marker = "const relatedData";
+    const markerIndex = source.indexOf(marker);
+
+    if (markerIndex === -1) {
+        console.error("[RareAnimes] relatedData marker not found");
         return {};
     }
 
+    const start = source.indexOf("{", markerIndex);
+
+    if (start === -1) {
+        console.error("[RareAnimes] relatedData object start not found");
+        return {};
+    }
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let end = -1;
+
+    for (let i = start; i < source.length; i++) {
+        const char = source[i];
+
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+
+            if (char === "\\") {
+                escaped = true;
+                continue;
+            }
+
+            if (char === '"') {
+                inString = false;
+            }
+
+            continue;
+        }
+
+        if (char === '"') {
+            inString = true;
+            continue;
+        }
+
+        if (char === "{") {
+            depth++;
+        } else if (char === "}") {
+            depth--;
+
+            if (depth === 0) {
+                end = i + 1;
+                break;
+            }
+        }
+    }
+
+    if (end === -1) {
+        console.error("[RareAnimes] relatedData object end not found");
+        return {};
+    }
+
+    const jsonText = source.slice(start, end);
+
     try {
-        return JSON.parse(match[1]);
+        return JSON.parse(jsonText);
     } catch (err) {
-        console.error("[RareAnimes] relatedData JSON parse failed:", err.message);
+        console.error(
+            "[RareAnimes] relatedData JSON parse failed:",
+            err.message
+        );
         return {};
     }
 };
