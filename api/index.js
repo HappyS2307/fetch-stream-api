@@ -2044,6 +2044,45 @@ app.get('/rareanimes/streams', async (req, res) => {
         const streams = [];
         const seen = new Set();
 
+        // Public player/server links exposed directly on the RareAnimes page.
+        // Keep these URLs unchanged; do not decode zipper payloads.
+        $('a[href]').each((index, element) => {
+            let href = $(element).attr('href');
+            const label = $(element).text().replace(/\\s+/g, ' ').trim();
+
+            if (!href || !label) return;
+
+            const normalizedLabel = label.toLowerCase();
+            const isKnownPlayer =
+                normalizedLabel.includes('watchmultiquality') ||
+                normalizedLabel === 'hubcloud' ||
+                normalizedLabel === 'watchnow' ||
+                normalizedLabel === 'dlbeta';
+
+            if (!isKnownPlayer) return;
+
+            try {
+                href = new URL(href, RAREANIMES_BASE).href;
+            } catch {
+                return;
+            }
+
+            if (!/^https?:\\/\\//i.test(href) || seen.has(href)) return;
+
+            seen.add(href);
+
+            streams.push({
+                server:
+                    normalizedLabel.includes('watchmultiquality')
+                        ? 'Watch Quality'
+                        : label,
+                language: 'Default',
+                link: href,
+                type: 'player',
+                public: true
+            });
+        });
+
         $('iframe').each((index, element) => {
             let src =
                 $(element).attr('src') ||
