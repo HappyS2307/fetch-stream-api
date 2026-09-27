@@ -752,6 +752,124 @@ const extractRareAnimesRelatedData = (html) => {
     }
 };
 
+
+const extractRareAnimesArgonEmbed = ($) => {
+    let src = null;
+
+    $('iframe').each((index, element) => {
+        if (src) return;
+
+        const candidate =
+            $(element).attr('src') ||
+            $(element).attr('data-src') ||
+            $(element).attr('data-lazy-src');
+
+        if (!candidate) return;
+
+        try {
+            const absolute = new URL(candidate, RAREANIMES_BASE).href;
+            const parsed = new URL(absolute);
+
+            if (
+                parsed.hostname === 'argon.razorshell.space' &&
+                parsed.pathname.startsWith('/embed/')
+            ) {
+                src = absolute;
+            }
+        } catch {}
+    });
+
+    if (!src) return null;
+
+    let language = 'Default';
+    const langText =
+        $('.badge-lang').first().text().replace(/\s+/g, ' ').trim();
+
+    if (langText) {
+        language = langText;
+    }
+
+    return {
+        server: 'Argon',
+        language,
+        link: src,
+        type: 'embed',
+        public: true
+    };
+};
+
+const loadRareAnimesEpisodeById = async (episodeId) => {
+    if (!episodeId) return null;
+
+    const episodeUrl =
+        RAREANIMES_BASE +
+        '/?url=' +
+        encodeURIComponent(String(episodeId));
+
+    try {
+        const page = await fetchRareAnimesPage(episodeUrl);
+        const $ = cheerio.load(page.data);
+        const stream = extractRareAnimesArgonEmbed($);
+
+        if (!stream) return null;
+
+        const title =
+            $('h1').first().text().replace(/\s+/g, ' ').trim() ||
+            null;
+
+        return {
+            stream,
+            title,
+            link: episodeUrl
+        };
+    } catch (err) {
+        console.error(
+            '[RareAnimes] Argon episode load failed:',
+            episodeId,
+            err.message
+        );
+        return null;
+    }
+};
+
+const loadRareAnimesSeason = async (season) => {
+    const sourceEpisodes = Array.isArray(season?.episodes)
+        ? season.episodes
+        : [];
+
+    const results = [];
+    const concurrency = 6;
+
+    for (let i = 0; i < sourceEpisodes.length; i += concurrency) {
+        const batch = sourceEpisodes.slice(i, i + concurrency);
+
+        const loaded = await Promise.all(
+            batch.map(async (item, batchIndex) => {
+                const resolved = await loadRareAnimesEpisodeById(item.id);
+
+                if (!resolved) return null;
+
+                const fallbackNum =
+                    i + batchIndex + 1;
+
+                return {
+                    epNum: Number(item.e || 0) || fallbackNum,
+                    title:
+                        item.ep_name ||
+                        resolved.title ||
+                        ('Episode ' + (item.e || fallbackNum)),
+                    link: resolved.link,
+                    streams: [resolved.stream]
+                };
+            })
+        );
+
+        results.push(...loaded.filter(Boolean));
+    }
+
+    return results.sort((a, b) => a.epNum - b.epNum);
+};
+
 const searchRareAnimes = async (query) => {
     const cleanQuery = String(query || "").trim();
 
@@ -1924,8 +2042,12 @@ app.get('/rareanimes/search', async (req, res) => {
    RAREANIMES EPISODES
    ========================================= */
 
+
 app.get('/rareanimes/episodes', async (req, res) => {
     const rawUrl = req.query.url;
+    const requestedSeason = req.query.season
+        ? String(req.query.season)
+        : null;
 
     if (!rawUrl) {
         return res.status(400).json({
@@ -1935,35 +2057,92 @@ app.get('/rareanimes/episodes', async (req, res) => {
 
     try {
         const page = await fetchRareAnimesPage(rawUrl);
-        const $ = cheerio.load(page.data);
+        const html = String(page.data || '');
+        const relatedData = extractRareAnimesRelatedData(html);
 
+        const seasonEntries = Object.entries(relatedData)
+            .filter(([, value]) =>
+                value &&
+                value.type === 'series' &&
+                Array.isArray(value.episodes)
+            )
+            .sort((a, b) => {
+                const aNum =
+                    Number(a[1].episodes?.[0]?.s) ||
+                    Number(a[0].replace(/\D/g, '')) ||
+                    0;
+                const bNum =
+                    Number(b[1].episodes?.[0]?.s) ||
+                    Number(b[0].replace(/\D/g, '')) ||
+                    0;
+                return aNum - bNum;
+            });
+
+        if (seasonEntries.length) {
+            const seasons = seasonEntries.map(([key, value]) => ({
+                seasonKey: key,
+                seasonNum:
+                    Number(value.episodes?.[0]?.s) ||
+                    Number(key.replace(/\D/g, '')) ||
+                    1,
+                name:
+                    value.title ||
+                    ('Season ' + key.replace(/\D/g, '')),
+                episodeCount: value.episodes.length
+            }));
+
+            const selectedEntry =
+                seasonEntries.find(([key, value]) => {
+                    const num =
+                        Number(value.episodes?.[0]?.s) ||
+                        Number(key.replace(/\D/g, '')) ||
+                        1;
+                    return String(num) === requestedSeason;
+                }) ||
+                seasonEntries[0];
+
+            const selectedSeason = selectedEntry[1];
+            const episodes = await loadRareAnimesSeason(selectedSeason);
+
+            res.json({
+                source: 'RareAnimes',
+                seasons,
+                episodes,
+                mapped_episodes: episodes.length,
+                source_base: RAREANIMES_BASE,
+                mapping: 'relatedData_episode_ids_to_argon'
+            });
+            return;
+        }
+
+        const $ = cheerio.load(html);
         const grouped = extractRareAnimesEpisodePlayers($);
 
         const episodes = grouped.map(item => ({
             epNum: item.epNum,
-            title: item.title || `Episode ${item.epNum}`,
+            title: item.title || ('Episode ' + item.epNum),
             link: rawUrl,
             streams: item.streams
         }));
 
         res.json({
-            source: "RareAnimes",
+            source: 'RareAnimes',
             seasons: [],
             episodes,
             mapped_episodes: episodes.length,
             source_base: RAREANIMES_BASE,
             mapping: episodes.length
-                ? "dom_episode_labels"
-                : "unmapped"
+                ? 'public_player_groups'
+                : 'unmapped'
         });
     } catch (err) {
         handleScraperError(
             res,
             err,
-            "Failed to load episodes from RareAnimes"
+            'Failed to load episodes from RareAnimes'
         );
     }
-});;
+});
 
 /* =========================================
    RAREANIMES DEBUG
