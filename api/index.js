@@ -1798,6 +1798,70 @@ app.get('/rareanimes/debug', async (req, res) => {
     }
 });
 
+
+/* =========================================
+   RAREANIMES CONTENT DEBUG
+   ========================================= */
+
+app.get('/rareanimes/debug-content', async (req, res) => {
+    const rawUrl = req.query.url;
+
+    if (!rawUrl) {
+        return res.status(400).json({
+            error: "URL is required"
+        });
+    }
+
+    try {
+        const page = await fetchRareAnimesPage(rawUrl);
+        const html = String(page.data || "");
+
+        const keywords = [
+            "SEA_",
+            "episode",
+            "Episode",
+            "iframe",
+            "argon",
+            "razorshell",
+            "Homecoming",
+            "relatedData",
+            "openRelatedModal",
+            "videoPlayer"
+        ];
+
+        const matches = {};
+
+        for (const keyword of keywords) {
+            const index = html.indexOf(keyword);
+
+            matches[keyword] = {
+                found: index !== -1,
+                position: index,
+                snippet:
+                    index !== -1
+                        ? html.slice(
+                              Math.max(0, index - 500),
+                              Math.min(html.length, index + 1500)
+                          )
+                        : null
+            };
+        }
+
+        res.json({
+            success: true,
+            final_url: page.url,
+            html_length: html.length,
+            matches
+        });
+    } catch (err) {
+        handleScraperError(
+            res,
+            err,
+            "RareAnimes content debug failed"
+        );
+    }
+});
+
 /* =========================================
    RAREANIMES PUBLIC PLAYER LINKS
    ========================================= */
