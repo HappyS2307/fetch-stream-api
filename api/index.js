@@ -863,6 +863,7 @@ const getRareAnimesEpisodes = (html) => {
     const relatedData = extractRareAnimesRelatedData(html);
     const seasons = [];
 
+    // Legacy/current public-page format: relatedData -> SEA_* -> episodes[]
     for (const [key, group] of Object.entries(relatedData)) {
         if (!/^SEA_\d+$/i.test(key) || !group) {
             continue;
@@ -888,15 +889,111 @@ const getRareAnimesEpisodes = (html) => {
                 }))
             : [];
 
-        if (!episodes.length) {
-            continue;
-        }
+        if (!episodes.length) continue;
 
         seasons.push({
             name: group.title || ("Season " + seasonNum),
             seasonNum,
             episodes
         });
+    }
+
+    // Current public-page fallback:
+    // episode pages are exposed as public links containing ?url=<episode-id>.
+    if (!seasons.length) {
+        const $ = cheerio.load(String(html || ""));
+        const episodes = [];
+        const seen = new Set();
+
+        $('a[href]').each((index, element) => {
+            const href = $(element).attr('href');
+            if (!href) return;
+
+            let link;
+            try {
+                link = new URL(href, RAREANIMES_BASE).href;
+            } catch {
+                return;
+            }
+
+            const parsed = new URL(link);
+            const episodeId = parsed.searchParams.get('url');
+
+            if (
+                parsed.hostname !== 'www.rareanimes.mov' &&
+                parsed.hostname !== 'rareanimes.mov'
+            ) {
+                return;
+            }
+
+            if (!episodeId || seen.has(episodeId)) return;
+
+            const text =
+                $(element)
+                    .text()
+                    .replace(/\s+/g, ' ')
+                    .trim() ||
+                $(element).attr('title')?.trim() ||
+                $(element).find('img').attr('alt')?.trim() ||
+                '';
+
+            // Keep only links that look like episode entries.
+            const looksLikeEpisode =
+                /\b(?:episode|ep|e)\s*[-_.:#]?\s*\d+\b/i.test(text) ||
+                /\b\d+\b/.test(text);
+
+            if (!looksLikeEpisode) return;
+
+            const numberMatch =
+                text.match(/\b(?:episode|ep|e)\s*[-_.:#]?\s*(\d+)\b/i) ||
+                text.match(/\b(\d+)\b/);
+
+            const epNum =
+                numberMatch?.[1] ||
+                String(episodes.length + 1);
+
+            let image =
+                $(element).find('img').attr('data-src') ||
+                $(element).find('img').attr('data-lazy-src') ||
+                $(element).find('img').attr('src') ||
+                null;
+
+            if (image) {
+                try {
+                    image = new URL(image, RAREANIMES_BASE).href;
+                } catch {
+                    image = null;
+                }
+            }
+
+            seen.add(episodeId);
+
+            episodes.push({
+                epNum: String(epNum),
+                title: text || `Episode ${epNum}`,
+                link,
+                image
+            });
+        });
+
+        episodes.sort((a, b) => Number(a.epNum) - Number(b.epNum));
+
+        if (episodes.length) {
+            const seasonMatch =
+                String(
+                    $('h1').first().text() ||
+                    $('title').text() ||
+                    ''
+                ).match(/season\s*(\d+)/i);
+
+            const seasonNum = seasonMatch?.[1] || '1';
+
+            seasons.push({
+                name: `Season ${seasonNum}`,
+                seasonNum,
+                episodes
+            });
+        }
     }
 
     seasons.sort(
