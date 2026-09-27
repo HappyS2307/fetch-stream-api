@@ -787,12 +787,20 @@ const extractRareAnimesArgonEmbed = ($, html = "") => {
             .replace(/\\\//g, '/')
             .replace(/\\u0026/g, '&');
 
-        const match = source.match(
-            /https?:\/\/argon\.razorshell\.space\/embed\/[^"'\s<>]+/i
-        );
+        const marker = 'https://argon.razorshell.space/embed/';
+        const markerIndex = source.indexOf(marker);
 
-        if (match) {
-            src = match[0];
+        if (markerIndex !== -1) {
+            let end = markerIndex + marker.length;
+
+            while (
+                end < source.length &&
+                !/[\s"'<>]/.test(source[end])
+            ) {
+                end++;
+            }
+
+            src = source.slice(markerIndex, end);
         }
     }
 
