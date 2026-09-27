@@ -1801,138 +1801,104 @@ app.get('/toonstream/streams', async (req, res) => {
    ========================================= */
 
 const extractRareAnimesEpisodePlayers = ($) => {
-    const links = [];
+    const episodes = [];
+    const episodeMap = new Map();
 
-    $('a[href]').each((index, element) => {
-        const href = String($(element).attr('href') || '').trim();
+    $('p').each((index, element) => {
         const label = $(element).text().replace(/\s+/g, ' ').trim();
 
-        if (!href || !label) return;
-
-        let absolute;
-        try {
-            absolute = new URL(href, RAREANIMES_BASE).href;
-        } catch {
+        if (!/watchmultiquality|hubcloud|watchnow|dlbeta/i.test(label)) {
             return;
         }
 
-        let parsed;
-        try {
-            parsed = new URL(absolute);
-        } catch {
-            return;
-        }
+        const links = [];
 
-        if (
-            parsed.hostname !== 'codedew.com' ||
-            !parsed.pathname.startsWith('/zipper/')
-        ) {
-            return;
-        }
+        $(element).find('a[href]').each((_, child) => {
+            const serverLabel = $(child).text().replace(/\s+/g, ' ').trim();
+            let href = String($(child).attr('href') || '').trim();
 
-        const serverMatch =
-            label.match(/watch\s*multi\s*quality/i) ||
-            label.match(/hubcloud/i) ||
-            label.match(/watch\s*now/i) ||
-            label.match(/dlbeta/i);
+            if (!/watchmultiquality|hubcloud|watchnow|dlbeta/i.test(serverLabel)) {
+                return;
+            }
 
-        if (!serverMatch) return;
+            try {
+                href = new URL(href, RAREANIMES_BASE).href;
+            } catch {
+                return;
+            }
 
-        let server = 'Player';
-        if (/watch\s*multi\s*quality/i.test(label)) server = 'Watch Quality';
-        else if (/hubcloud/i.test(label)) server = 'HubCloud';
-        else if (/watch\s*now/i.test(label)) server = 'WatchNow';
-        else if (/dlbeta/i.test(label)) server = 'DLBeta';
+            const parsed = new URL(href);
 
-        links.push({
-            index,
-            server,
-            link: absolute
+            if (
+                parsed.hostname !== 'codedew.com' ||
+                !parsed.pathname.startsWith('/zipper/')
+            ) {
+                return;
+            }
+
+            let server = serverLabel;
+            if (/watchmultiquality/i.test(serverLabel)) server = 'Watch Quality';
+            else if (/hubcloud/i.test(serverLabel)) server = 'HubCloud';
+            else if (/watchnow/i.test(serverLabel)) server = 'WatchNow';
+            else if (/dlbeta/i.test(serverLabel)) server = 'DLBeta';
+
+            let language = 'Default';
+            if (/^hindi\b/i.test(label)) language = 'Hindi';
+            else if (/^tamil\b/i.test(label)) language = 'Tamil';
+            else if (/^telugu\b/i.test(label)) language = 'Telugu';
+
+            links.push({
+                server,
+                language,
+                link: href,
+                type: 'player',
+                public: true
+            });
         });
-    });
 
-    if (!links.length) return [];
+        if (!links.length) return;
 
-    const findEpisodeNumber = (element) => {
-        let node = $(element);
+        let episodeNumber = null;
+        let episodeTitle = null;
+        let sibling = $(element).prev();
 
-        for (let depth = 0; depth < 8 && node.length; depth++) {
-            const text = node.text().replace(/\s+/g, ' ').trim();
+        for (let depth = 0; depth < 10 && sibling.length; depth++) {
+            const siblingText = sibling.text().replace(/\s+/g, ' ').trim();
+            const match = siblingText.match(/^Episode\s*[-#: ]?\s*(\d{1,4})\s*[–—-]\s*(.+)$/i);
 
-            const match =
-                text.match(/(?:episode|ep)\s*[-#: ]?\s*(\d{1,4})/i) ||
-                text.match(/(?:e)\s*(\d{1,4})(?:\b|$)/i);
+            if (match) {
+                episodeNumber = Number(match[1]);
+                episodeTitle = match[2].trim();
+                break;
+            }
 
-            if (match) return Number(match[1]);
-
-            node = node.parent();
+            sibling = sibling.prev();
         }
 
-        return null;
-    };
+        if (episodeNumber == null) return;
 
-    const rawGroups = [];
-    const used = new Set();
-
-    $('a[href]').each((index, element) => {
-        if (!links.some(item => item.index === index)) return;
-
-        const epNum = findEpisodeNumber(element);
-        if (epNum == null) return;
-
-        const key = String(epNum);
-        if (!rawGroups.some(group => group.epNum === epNum)) {
-            rawGroups.push({
-                epNum,
-                title: `Episode ${epNum}`,
+        if (!episodeMap.has(episodeNumber)) {
+            const episode = {
+                epNum: episodeNumber,
+                title: episodeTitle || `Episode ${episodeNumber}`,
                 streams: []
-            });
+            };
+
+            episodeMap.set(episodeNumber, episode);
+            episodes.push(episode);
         }
 
-        const group = rawGroups.find(item => item.epNum === epNum);
-        const link = links.find(item => item.index === index);
+        const episode = episodeMap.get(episodeNumber);
 
-        if (link && !used.has(link.link)) {
-            used.add(link.link);
-            group.streams.push({
-                server: link.server,
-                language: 'Default',
-                link: link.link,
-                type: 'player',
-                public: true
-            });
+        for (const stream of links) {
+            if (!episode.streams.some(item => item.link === stream.link)) {
+                episode.streams.push(stream);
+            }
         }
     });
 
-    if (rawGroups.length) {
-        return rawGroups.sort((a, b) => a.epNum - b.epNum);
-    }
-
-    // Current RareAnimes pages expose repeated public server-link sets.
-    // When episode labels are not present in the DOM, preserve those public
-    // links and group them in their observed four-server sets.
-    const fallback = [];
-    const chunkSize = 4;
-
-    for (let i = 0; i < links.length; i += chunkSize) {
-        const chunk = links.slice(i, i + chunkSize);
-
-        fallback.push({
-            epNum: Math.floor(i / chunkSize) + 1,
-            title: `Episode ${Math.floor(i / chunkSize) + 1}`,
-            streams: chunk.map(item => ({
-                server: item.server,
-                language: 'Default',
-                link: item.link,
-                type: 'player',
-                public: true
-            }))
-        });
-    }
-
-    return fallback;
+    return episodes.sort((a, b) => a.epNum - b.epNum);
 };
-
 /* =========================================
    RAREANIMES SEARCH
    ========================================= */
