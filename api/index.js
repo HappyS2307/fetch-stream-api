@@ -2067,7 +2067,7 @@ app.get('/rareanimes/streams', async (req, res) => {
                 return;
             }
 
-            if (!/^https?:\\/\\//i.test(href) || seen.has(href)) return;
+            if (!/^https?:\/\//i.test(href) || seen.has(href)) return;
 
             seen.add(href);
 
