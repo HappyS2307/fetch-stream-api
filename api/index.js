@@ -2170,6 +2170,77 @@ app.get('/rareanimes/debug-links', async (req, res) => {
 });
 
 
+app.get('/rareanimes/episode-structure', async (req, res) => {
+    const rawUrl = req.query.url;
+
+    if (!rawUrl) {
+        return res.status(400).json({ error: "URL is required" });
+    }
+
+    try {
+        const page = await fetchRareAnimesPage(rawUrl);
+        const $ = cheerio.load(page.data);
+        const items = [];
+
+        $('a[href]').each((index, element) => {
+            const label = $(element).text().replace(/\s+/g, ' ').trim();
+            const href = String($(element).attr('href') || '');
+
+            if (
+                !/watchmultiquality|hubcloud|watchnow|dlbeta/i.test(label) ||
+                !/^https?:\/\/codedew\.com\/zipper\//i.test(
+                    new URL(href, page.url || RAREANIMES_BASE).href
+                )
+            ) {
+                return;
+            }
+
+            const ancestors = [];
+            let node = $(element);
+
+            for (let depth = 0; depth < 8 && node.length; depth++) {
+                const el = node[0];
+                const tag = String(el.name || '').toLowerCase();
+                const id = String(node.attr('id') || '');
+                const cls = String(node.attr('class') || '');
+                const text = node.text().replace(/\s+/g, ' ').trim();
+
+                ancestors.push({
+                    depth,
+                    tag,
+                    id,
+                    class: cls.slice(0, 200),
+                    text: text.slice(0, 500),
+                    player_count: node.find('a[href]').filter((i, child) =>
+                        /watchmultiquality|hubcloud|watchnow|dlbeta/i.test(
+                            $(child).text().replace(/\s+/g, ' ').trim()
+                        )
+                    ).length
+                });
+
+                node = node.parent();
+            }
+
+            items.push({
+                index,
+                label,
+                href: href.slice(0, 500),
+                ancestors
+            });
+        });
+
+        res.json({
+            success: true,
+            final_url: page.url,
+            player_count: items.length,
+            items: items.slice(0, 40)
+        });
+    } catch (err) {
+        handleScraperError(res, err, "RareAnimes episode structure debug failed");
+    }
+});
+
+
 app.get('/rareanimes/streams', async (req, res) => {
     const rawUrl = req.query.url;
 
