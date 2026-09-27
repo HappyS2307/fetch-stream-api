@@ -2241,6 +2241,87 @@ app.get('/rareanimes/episode-structure', async (req, res) => {
 });
 
 
+app.get('/rareanimes/player-groups', async (req, res) => {
+    const rawUrl = req.query.url;
+
+    if (!rawUrl) {
+        return res.status(400).json({ error: "URL is required" });
+    }
+
+    try {
+        const page = await fetchRareAnimesPage(rawUrl);
+        const $ = cheerio.load(page.data);
+        const groups = [];
+        const seen = new Set();
+
+        $('p').each((index, element) => {
+            const links = [];
+
+            $(element).find('a[href]').each((_, child) => {
+                const label = $(child).text().replace(/\s+/g, ' ').trim();
+                let href = String($(child).attr('href') || '');
+
+                if (!/watchmultiquality|hubcloud|watchnow|dlbeta/i.test(label)) return;
+
+                try {
+                    href = new URL(href, page.url || RAREANIMES_BASE).href;
+                } catch {
+                    return;
+                }
+
+                if (!/^https?:\/\/codedew\.com\/zipper\//i.test(href)) return;
+
+                links.push({
+                    server: /watchmultiquality/i.test(label)
+                        ? 'Watch Quality'
+                        : label,
+                    link: href
+                });
+            });
+
+            if (!links.length) return;
+
+            const parent = $(element).parent();
+            const previous = [];
+            let sibling = $(element).prev();
+
+            for (let i = 0; i < 5 && sibling.length; i++) {
+                const text = sibling.text().replace(/\s+/g, ' ').trim();
+                if (text) previous.push(text.slice(0, 500));
+                sibling = sibling.prev();
+            }
+
+            const text = $(element).text().replace(/\s+/g, ' ').trim();
+
+            const key = links.map(x => x.link).join('|');
+            if (seen.has(key)) return;
+            seen.add(key);
+
+            groups.push({
+                index,
+                label: text,
+                link_count: links.length,
+                links,
+                previous_siblings: previous,
+                parent_tag: String(parent[0]?.name || ''),
+                parent_class: String(parent.attr('class') || '').slice(0, 200),
+                parent_text: parent.text().replace(/\s+/g, ' ').trim().slice(0, 800)
+            });
+        });
+
+        res.json({
+            success: true,
+            final_url: page.url,
+            group_count: groups.length,
+            total_player_links: groups.reduce((n, g) => n + g.link_count, 0),
+            groups
+        });
+    } catch (err) {
+        handleScraperError(res, err, "RareAnimes player group debug failed");
+    }
+});
+
+
 app.get('/rareanimes/streams', async (req, res) => {
     const rawUrl = req.query.url;
 
