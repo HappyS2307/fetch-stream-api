@@ -1832,17 +1832,26 @@ app.get('/rareanimes/episodes', async (req, res) => {
 
     try {
         const page = await fetchRareAnimesPage(rawUrl);
-        const parsed = getRareAnimesEpisodes(page.data);
+        const $ = cheerio.load(page.data);
+
+        const grouped = extractRareAnimesEpisodePlayers($);
+
+        const episodes = grouped.map(item => ({
+            epNum: item.epNum,
+            title: item.title || `Episode ${item.epNum}`,
+            link: rawUrl,
+            streams: item.streams
+        }));
 
         res.json({
             source: "RareAnimes",
-            seasons: parsed.seasons.map(season => ({
-                name: season.name,
-                seasonNum: season.seasonNum,
-                episodes: season.episodes
-            })),
-            episodes: parsed.episodes,
-            source_base: RAREANIMES_BASE
+            seasons: [],
+            episodes,
+            mapped_episodes: episodes.length,
+            source_base: RAREANIMES_BASE,
+            mapping: episodes.length
+                ? "dom_episode_labels"
+                : "unmapped"
         });
     } catch (err) {
         handleScraperError(
@@ -1851,7 +1860,7 @@ app.get('/rareanimes/episodes', async (req, res) => {
             "Failed to load episodes from RareAnimes"
         );
     }
-});
+});;
 
 /* =========================================
    RAREANIMES DEBUG
@@ -2022,6 +2031,130 @@ app.get('/rareanimes/debug-links', async (req, res) => {
         handleScraperError(res, err, "RareAnimes link debug failed");
     }
 });
+
+
+const extractRareAnimesEpisodePlayers = ($) => {
+    const PLAYER_LABELS = [
+        'watchmultiquality',
+        'hubcloud',
+        'watchnow',
+        'dlbeta'
+    ];
+
+    const normalizeText = value =>
+        String(value || '').replace(/\\s+/g, ' ').trim();
+
+    const isPlayerAnchor = (el) => {
+        const label = normalizeText($(el).text()).toLowerCase();
+        return PLAYER_LABELS.some(name =>
+            label === name || label.includes(name)
+        );
+    };
+
+    const getEpisodeNumber = (text) => {
+        const value = normalizeText(text);
+
+        const patterns = [
+            /(?:episode|ep)\\s*[-#: ]?\\s*(\\d{1,4})\\b/i,
+            /\\bE(?:pisode)?\\s*(\\d{1,4})\\b/i,
+            /\\b(\\d{1,4})\\s*\\b/
+        ];
+
+        for (const pattern of patterns.slice(0, 2)) {
+            const match = value.match(pattern);
+            if (match) return String(parseInt(match[1], 10));
+        }
+
+        return null;
+    };
+
+    const groups = new Map();
+
+    $('a[href]').each((index, element) => {
+        if (!isPlayerAnchor(element)) return;
+
+        let href = $(element).attr('href');
+        if (!href) return;
+
+        try {
+            href = new URL(href, RAREANIMES_BASE).href;
+        } catch {
+            return;
+        }
+
+        if (!/^https?:\\/\\//i.test(href)) return;
+
+        let node = $(element);
+        let selected = null;
+
+        for (let level = 0; level < 9 && node.length; level++) {
+            const text = normalizeText(node.text());
+            const episodeNumber = getEpisodeNumber(text);
+            const playerCount = node.find('a[href]').filter((_, child) =>
+                isPlayerAnchor(child)
+            ).length;
+
+            if (
+                episodeNumber &&
+                playerCount >= 1 &&
+                playerCount <= 8
+            ) {
+                selected = {
+                    node,
+                    episodeNumber,
+                    text
+                };
+                break;
+            }
+
+            node = node.parent();
+        }
+
+        if (!selected) return;
+
+        const key = selected.episodeNumber;
+        if (!groups.has(key)) {
+            groups.set(key, {
+                epNum: key,
+                title: null,
+                streams: []
+            });
+        }
+
+        const group = groups.get(key);
+
+        if (!group.title) {
+            const heading = selected.node
+                .find('h1, h2, h3, h4, h5, strong, b')
+                .first()
+                .text();
+
+            group.title =
+                normalizeText(heading) ||
+                `Episode ${key}`;
+        }
+
+        const label = normalizeText($(element).text());
+        const normalizedLabel = label.toLowerCase();
+        const server =
+            normalizedLabel.includes('watchmultiquality')
+                ? 'Watch Quality'
+                : label;
+
+        if (!group.streams.some(stream => stream.link === href)) {
+            group.streams.push({
+                server,
+                language: 'Default',
+                link: href,
+                type: 'player',
+                public: true
+            });
+        }
+    });
+
+    return [...groups.values()]
+        .sort((a, b) => Number(a.epNum) - Number(b.epNum));
+};
 
 /* =========================================
    RAREANIMES PUBLIC PLAYER LINKS
