@@ -2082,7 +2082,7 @@ const extractRareAnimesEpisodePlayers = ($) => {
             return;
         }
 
-        if (!/^https?:///i.test(href)) return;
+        if (!/^https?:\/\//i.test(href)) return;
 
         let node = $(element);
         let selected = null;
@@ -2094,16 +2094,8 @@ const extractRareAnimesEpisodePlayers = ($) => {
                 isPlayerAnchor(child)
             ).length;
 
-            if (
-                episodeNumber &&
-                playerCount >= 1 &&
-                playerCount <= 8
-            ) {
-                selected = {
-                    node,
-                    episodeNumber,
-                    text
-                };
+            if (episodeNumber && playerCount >= 1 && playerCount <= 8) {
+                selected = { node, episodeNumber, text };
                 break;
             }
 
@@ -2112,69 +2104,22 @@ const extractRareAnimesEpisodePlayers = ($) => {
 
         if (!selected) return;
 
-        const key = selected.episodeNumber;
-        if (!groups.has(key)) {
-            groups.set(key, {
-                epNum: key,
-                title: null,
-                streams: []
-            });
-        }
+        const key = String(selected.episodeNumber);
+        if (!groups.has(key)) groups.set(key, []);
 
-        const group = groups.get(key);
-
-        if (!group.title) {
-            const heading = selected.node
-                .find('h1, h2, h3, h4, h5, strong, b')
-                .first()
-                .text();
-
-            group.title =
-                normalizeText(heading) ||
-                `Episode ${key}`;
-        }
-
-        const label = normalizeText($(element).text());
-        const normalizedLabel = label.toLowerCase();
-        const server =
-            normalizedLabel.includes('watchmultiquality')
-                ? 'Watch Quality'
-                : label;
-
-        if (!group.streams.some(stream => stream.link === href)) {
-            group.streams.push({
-                server,
-                language: 'Default',
+        const existing = groups.get(key);
+        if (!existing.some((item) => item.link === href)) {
+            existing.push({
+                server: getPlayerLabel(element),
+                language: "Default",
                 link: href,
-                type: 'player',
+                type: "player",
                 public: true
             });
         }
     });
 
-    return [...groups.values()]
-        .sort((a, b) => Number(a.epNum) - Number(b.epNum));
-};
-
-/* =========================================
-   RAREANIMES PUBLIC PLAYER LINKS
-   ========================================= */
-
-app.get('/rareanimes/streams', async (req, res) => {
-    const rawUrl = req.query.url;
-
-    if (!rawUrl) {
-        return res.status(400).json({
-            error: "URL is required"
-        });
-    }
-
-    try {
-        const page = await fetchRareAnimesPage(rawUrl);
-        const $ = cheerio.load(page.data);
-
-        const title = $('h1').first().text().trim() || null;
-        const streams = [];
+    const streams = [];
         const seen = new Set();
 
         // Public player/server links exposed directly on the RareAnimes page.
