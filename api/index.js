@@ -2033,114 +2033,42 @@ app.get('/rareanimes/debug-links', async (req, res) => {
 });
 
 
-const extractRareAnimesEpisodePlayers = ($) => {
-    const PLAYER_LABELS = [
-        'watchmultiquality',
-        'hubcloud',
-        'watchnow',
-        'dlbeta'
-    ];
+app.get('/rareanimes/streams', async (req, res) => {
+    const rawUrl = req.query.url;
 
-    const normalizeText = value =>
-        String(value || '').replace(/s+/g, ' ').trim();
+    if (!rawUrl) {
+        return res.status(400).json({
+            error: "URL is required"
+        });
+    }
 
-    const isPlayerAnchor = (el) => {
-        const label = normalizeText($(el).text()).toLowerCase();
-        return PLAYER_LABELS.some(name =>
-            label === name || label.includes(name)
-        );
-    };
+    try {
+        const page = await fetchRareAnimesPage(rawUrl);
+        const $ = cheerio.load(page.data);
 
-    const getEpisodeNumber = (text) => {
-        const value = normalizeText(text);
+        const title =
+            $('h1').first().text().replace(/\s+/g, ' ').trim() || null;
 
-        const patterns = [
-            /(?:episode|ep)\\s*[-#: ]?\\s*(\\d{1,4})\\b/i,
-            /E(?:pisode)?\\s*(\\d{1,4})\\b/i,
-            /(\\d{1,4})\\s*\\b/
-        ];
-
-        for (const pattern of patterns.slice(0, 2)) {
-            const match = value.match(pattern);
-            if (match) return String(parseInt(match[1], 10));
-        }
-
-        return null;
-    };
-
-    const groups = new Map();
-
-    $('a[href]').each((index, element) => {
-        if (!isPlayerAnchor(element)) return;
-
-        let href = $(element).attr('href');
-        if (!href) return;
-
-        try {
-            href = new URL(href, RAREANIMES_BASE).href;
-        } catch {
-            return;
-        }
-
-        if (!/^https?:\/\//i.test(href)) return;
-
-        let node = $(element);
-        let selected = null;
-
-        for (let level = 0; level < 9 && node.length; level++) {
-            const text = normalizeText(node.text());
-            const episodeNumber = getEpisodeNumber(text);
-            const playerCount = node.find('a[href]').filter((_, child) =>
-                isPlayerAnchor(child)
-            ).length;
-
-            if (episodeNumber && playerCount >= 1 && playerCount <= 8) {
-                selected = { node, episodeNumber, text };
-                break;
-            }
-
-            node = node.parent();
-        }
-
-        if (!selected) return;
-
-        const key = String(selected.episodeNumber);
-        if (!groups.has(key)) groups.set(key, []);
-
-        const existing = groups.get(key);
-        if (!existing.some((item) => item.link === href)) {
-            existing.push({
-                server: getPlayerLabel(element),
-                language: "Default",
-                link: href,
-                type: "player",
-                public: true
-            });
-        }
-    });
-
-    const streams = [];
+        const streams = [];
         const seen = new Set();
 
-        // Public player/server links exposed directly on the RareAnimes page.
-        // Keep these URLs unchanged; do not decode zipper payloads.
         $('a[href]').each((index, element) => {
             let href = $(element).attr('href');
-            const label = $(element).text().replace(/s+/g, ' ').trim();
+            const label = $(element).text().replace(/\s+/g, ' ').trim();
 
             if (!href || !label) return;
 
-            const normalizedLabel = label.toLowerCase();
+            const normalized = label.toLowerCase();
             const isKnownPlayer =
-                normalizedLabel.includes('watchmultiquality') ||
-                normalizedLabel === 'hubcloud' ||
-                normalizedLabel === 'watchnow' ||
-                normalizedLabel === 'dlbeta';
+                normalized.includes('watchmultiquality') ||
+                normalized === 'hubcloud' ||
+                normalized === 'watchnow' ||
+                normalized === 'dlbeta';
 
             if (!isKnownPlayer) return;
 
             try {
-                href = new URL(href, RAREANIMES_BASE).href;
+                href = new URL(href, page.url || RAREANIMES_BASE).href;
             } catch {
                 return;
             }
@@ -2150,10 +2078,9 @@ const extractRareAnimesEpisodePlayers = ($) => {
             seen.add(href);
 
             streams.push({
-                server:
-                    normalizedLabel.includes('watchmultiquality')
-                        ? 'Watch Quality'
-                        : label,
+                server: normalized.includes('watchmultiquality')
+                    ? 'Watch Quality'
+                    : label,
                 language: 'Default',
                 link: href,
                 type: 'player',
@@ -2167,12 +2094,10 @@ const extractRareAnimesEpisodePlayers = ($) => {
                 $(element).attr('data-src') ||
                 $(element).attr('data-lazy-src');
 
-            if (!src || src === 'about:blank') {
-                return;
-            }
+            if (!src || src === 'about:blank') return;
 
             try {
-                src = new URL(src, RAREANIMES_BASE).href;
+                src = new URL(src, page.url || RAREANIMES_BASE).href;
             } catch {
                 return;
             }
@@ -2180,37 +2105,33 @@ const extractRareAnimesEpisodePlayers = ($) => {
             const parsed = new URL(src);
 
             if (
-                parsed.hostname === "www.rareanimes.mov" ||
-                parsed.hostname === "rareanimes.mov" ||
-                parsed.hostname === "wsrv.nl" ||
-                parsed.hostname === "www.google.com"
+                parsed.hostname === 'www.rareanimes.mov' ||
+                parsed.hostname === 'rareanimes.mov' ||
+                parsed.hostname === 'wsrv.nl' ||
+                parsed.hostname === 'www.google.com'
             ) {
                 return;
             }
 
-            if (seen.has(src)) {
-                return;
-            }
+            if (seen.has(src)) return;
 
             seen.add(src);
 
-            const isArgon =
-                parsed.hostname === "argon.razorshell.space" &&
-                parsed.pathname.startsWith("/embed/");
-
             streams.push({
                 server:
-                    isArgon
-                        ? "Argon"
-                        : "Player " + String(streams.length + 1),
-                language: "Default",
+                    parsed.hostname === 'argon.razorshell.space' &&
+                    parsed.pathname.startsWith('/embed/')
+                        ? 'Argon'
+                        : 'Player ' + String(streams.length + 1),
+                language: 'Default',
                 link: src,
-                type: "embed"
+                type: 'embed',
+                public: true
             });
         });
 
         res.json({
-            source: "RareAnimes",
+            source: 'RareAnimes',
             title,
             streams,
             total_streams: streams.length,
@@ -2220,7 +2141,7 @@ const extractRareAnimesEpisodePlayers = ($) => {
         handleScraperError(
             res,
             err,
-            "Failed to load streams from RareAnimes"
+            'Failed to load streams from RareAnimes'
         );
     }
 });
