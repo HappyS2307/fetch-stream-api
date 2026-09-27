@@ -655,6 +655,198 @@ const resolvePublicStreamUrl = async (
     }
 };
 
+
+const RAREANIMES_BASE = "https://www.rareanimes.mov";
+
+const fetchRareAnimesPage = async (rawUrl) => {
+    const url = new URL(rawUrl || "/", RAREANIMES_BASE).href;
+
+    const response = await axios.get(url, {
+        headers: getHeaders(RAREANIMES_BASE),
+        timeout: 15000,
+        maxRedirects: 5
+    });
+
+    return {
+        data: response.data,
+        url
+    };
+};
+
+const extractRareAnimesRelatedData = (html) => {
+    const match = String(html || "").match(
+        /const\s+relatedData\s*=\s*(\{[\s\S]*?\});\s*function\s+openRelatedModal/
+    );
+
+    if (!match) {
+        return {};
+    }
+
+    try {
+        return JSON.parse(match[1]);
+    } catch (err) {
+        console.error("[RareAnimes] relatedData JSON parse failed:", err.message);
+        return {};
+    }
+};
+
+const searchRareAnimes = async (query) => {
+    const cleanQuery = String(query || "").trim();
+
+    if (!cleanQuery) {
+        return [];
+    }
+
+    const searchUrl =
+        RAREANIMES_BASE +
+        "/?s=" +
+        encodeURIComponent(cleanQuery);
+
+    try {
+        const response = await axios.get(searchUrl, {
+            headers: getHeaders(RAREANIMES_BASE),
+            timeout: 15000,
+            maxRedirects: 5
+        });
+
+        const $ = cheerio.load(response.data);
+        const results = [];
+        const seen = new Set();
+        const queryLower = cleanQuery.toLowerCase();
+
+        $("a[href]").each((index, element) => {
+            const title = $(element)
+                .text()
+                .replace(/\s+/g, " ")
+                .trim();
+
+            const href = $(element).attr("href");
+
+            if (!title || !href) {
+                return;
+            }
+
+            let link;
+
+            try {
+                link = new URL(href, RAREANIMES_BASE).href;
+            } catch {
+                return;
+            }
+
+            const parsed = new URL(link);
+
+            if (parsed.hostname !== "www.rareanimes.mov") {
+                return;
+            }
+
+            if (
+                parsed.pathname === "/" &&
+                !parsed.searchParams.has("s")
+            ) {
+                return;
+            }
+
+            const blockedPaths = [
+                "/category/",
+                "/tag/",
+                "/page/",
+                "/author/",
+                "/search/"
+            ];
+
+            if (
+                blockedPaths.some(path =>
+                    parsed.pathname.includes(path)
+                )
+            ) {
+                return;
+            }
+
+            if (
+                parsed.searchParams.has("s") ||
+                parsed.searchParams.has("url")
+            ) {
+                return;
+            }
+
+            if (!title.toLowerCase().includes(queryLower)) {
+                return;
+            }
+
+            link = fixUrl(link);
+
+            if (seen.has(link)) {
+                return;
+            }
+
+            seen.add(link);
+
+            results.push({
+                title,
+                link,
+                type: "series",
+                source: "RareAnimes"
+            });
+        });
+
+        return results.slice(0, 30);
+    } catch (err) {
+        console.error("[RareAnimes] Search failed:", err.message);
+        return [];
+    }
+};
+
+const getRareAnimesEpisodes = (html) => {
+    const relatedData = extractRareAnimesRelatedData(html);
+    const seasons = [];
+
+    for (const [key, group] of Object.entries(relatedData)) {
+        if (!/^SEA_\d+$/i.test(key) || !group) {
+            continue;
+        }
+
+        const match = String(group.title || key).match(/(\d+)/);
+        const seasonNum = match ? match[1] : key.replace(/\D/g, "");
+
+        const episodes = Array.isArray(group.episodes)
+            ? group.episodes
+                .filter(ep => ep && ep.id)
+                .map((ep, index) => ({
+                    epNum: String(ep.e || index + 1),
+                    title:
+                        ep.ep_name ||
+                        group.title ||
+                        "Episode " + String(ep.e || index + 1),
+                    link:
+                        RAREANIMES_BASE +
+                        "/?url=" +
+                        encodeURIComponent(String(ep.id)),
+                    image: ep.img || group.poster || null
+                }))
+            : [];
+
+        if (!episodes.length) {
+            continue;
+        }
+
+        seasons.push({
+            name: group.title || ("Season " + seasonNum),
+            seasonNum,
+            episodes
+        });
+    }
+
+    seasons.sort(
+        (a, b) => Number(a.seasonNum) - Number(b.seasonNum)
+    );
+
+    return {
+        seasons,
+        episodes: seasons[0]?.episodes || []
+    };
+};
+
 // ==========================================
 // 2. EXPRESS ROUTES
 // ==========================================
@@ -666,7 +858,8 @@ app.get('/', (req, res) => {
         message: "FetchStream Scraper API is running.",
         sources: [
             "AnimeSalt",
-            "ToonStream"
+            "ToonStream",
+            "RareAnimes"
         ]
     });
 });
@@ -684,17 +877,23 @@ app.get('/search', async (req, res) => {
         });
     }
 
-    const [saltResults, toonResults] = await Promise.all([
-        searchAnimeSalt(query),
-        searchToonStream(query)
-    ]);
+    const [saltResults, toonResults, rareResults] =
+        await Promise.all([
+            searchAnimeSalt(query),
+            searchToonStream(query),
+            searchRareAnimes(query)
+        ]);
 
     res.json({
         query,
-        total: saltResults.length + toonResults.length,
+        total:
+            saltResults.length +
+            toonResults.length +
+            rareResults.length,
         results: [
             ...saltResults,
-            ...toonResults
+            ...toonResults,
+            ...rareResults
         ]
     });
 });
@@ -1433,6 +1632,149 @@ app.get('/toonstream/streams', async (req, res) => {
             res,
             err,
             "Failed to load streams from ToonStream"
+        );
+    }
+});
+
+
+/* =========================================
+   RAREANIMES SEARCH
+   ========================================= */
+
+app.get('/rareanimes/search', async (req, res) => {
+    const query = req.query.q;
+
+    if (!query) {
+        return res.status(400).json({
+            error: "Query 'q' is required"
+        });
+    }
+
+    const results = await searchRareAnimes(query);
+
+    res.json({
+        source: "RareAnimes",
+        results
+    });
+});
+
+/* =========================================
+   RAREANIMES EPISODES
+   ========================================= */
+
+app.get('/rareanimes/episodes', async (req, res) => {
+    const rawUrl = req.query.url;
+
+    if (!rawUrl) {
+        return res.status(400).json({
+            error: "URL is required"
+        });
+    }
+
+    try {
+        const page = await fetchRareAnimesPage(rawUrl);
+        const parsed = getRareAnimesEpisodes(page.data);
+
+        res.json({
+            source: "RareAnimes",
+            seasons: parsed.seasons.map(season => ({
+                name: season.name,
+                seasonNum: season.seasonNum,
+                episodes: season.episodes
+            })),
+            episodes: parsed.episodes,
+            source_base: RAREANIMES_BASE
+        });
+    } catch (err) {
+        handleScraperError(
+            res,
+            err,
+            "Failed to load episodes from RareAnimes"
+        );
+    }
+});
+
+/* =========================================
+   RAREANIMES PUBLIC PLAYER LINKS
+   ========================================= */
+
+app.get('/rareanimes/streams', async (req, res) => {
+    const rawUrl = req.query.url;
+
+    if (!rawUrl) {
+        return res.status(400).json({
+            error: "URL is required"
+        });
+    }
+
+    try {
+        const page = await fetchRareAnimesPage(rawUrl);
+        const $ = cheerio.load(page.data);
+
+        const title = $('h1').first().text().trim() || null;
+        const streams = [];
+        const seen = new Set();
+
+        $('iframe').each((index, element) => {
+            let src =
+                $(element).attr('src') ||
+                $(element).attr('data-src') ||
+                $(element).attr('data-lazy-src');
+
+            if (!src || src === 'about:blank') {
+                return;
+            }
+
+            try {
+                src = new URL(src, RAREANIMES_BASE).href;
+            } catch {
+                return;
+            }
+
+            const parsed = new URL(src);
+
+            if (
+                parsed.hostname === "www.rareanimes.mov" ||
+                parsed.hostname === "rareanimes.mov" ||
+                parsed.hostname === "wsrv.nl" ||
+                parsed.hostname === "www.google.com"
+            ) {
+                return;
+            }
+
+            if (seen.has(src)) {
+                return;
+            }
+
+            seen.add(src);
+
+            const isArgon =
+                parsed.hostname === "argon.razorshell.space" &&
+                parsed.pathname.startsWith("/embed/");
+
+            streams.push({
+                server:
+                    isArgon
+                        ? "Argon"
+                        : "Player " + String(streams.length + 1),
+                language: "Default",
+                link: src,
+                type: "embed"
+            });
+        });
+
+        res.json({
+            source: "RareAnimes",
+            title,
+            streams,
+            total_streams: streams.length,
+            source_base: RAREANIMES_BASE
+        });
+    } catch (err) {
+        handleScraperError(
+            res,
+            err,
+            "Failed to load streams from RareAnimes"
         );
     }
 });
