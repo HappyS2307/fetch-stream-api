@@ -2042,7 +2042,7 @@ const extractRareAnimesEpisodePlayers = ($) => {
     ];
 
     const normalizeText = value =>
-        String(value || '').replace(/\\s+/g, ' ').trim();
+        String(value || '').replace(/s+/g, ' ').trim();
 
     const isPlayerAnchor = (el) => {
         const label = normalizeText($(el).text()).toLowerCase();
@@ -2056,8 +2056,8 @@ const extractRareAnimesEpisodePlayers = ($) => {
 
         const patterns = [
             /(?:episode|ep)\\s*[-#: ]?\\s*(\\d{1,4})\\b/i,
-            /\\bE(?:pisode)?\\s*(\\d{1,4})\\b/i,
-            /\\b(\\d{1,4})\\s*\\b/
+            /E(?:pisode)?\\s*(\\d{1,4})\\b/i,
+            /(\\d{1,4})\\s*\\b/
         ];
 
         for (const pattern of patterns.slice(0, 2)) {
@@ -2082,7 +2082,7 @@ const extractRareAnimesEpisodePlayers = ($) => {
             return;
         }
 
-        if (!/^https?:\\/\\//i.test(href)) return;
+        if (!/^https?:///i.test(href)) return;
 
         let node = $(element);
         let selected = null;
@@ -2181,7 +2181,7 @@ app.get('/rareanimes/streams', async (req, res) => {
         // Keep these URLs unchanged; do not decode zipper payloads.
         $('a[href]').each((index, element) => {
             let href = $(element).attr('href');
-            const label = $(element).text().replace(/\\s+/g, ' ').trim();
+            const label = $(element).text().replace(/s+/g, ' ').trim();
 
             if (!href || !label) return;
 
