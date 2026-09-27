@@ -922,7 +922,142 @@ const loadRareAnimesSeason = async (season) => {
     return results.sort((a, b) => a.epNum - b.epNum);
 };
 
-const searchRareAnimes = async (query) => {\n    const cleanQuery = String(query || "").trim();\n    if (!cleanQuery) return [];\n\n    const queryParam = encodeURIComponent(cleanQuery);\n    const firstSearchUrl = RAREANIMES_BASE + "/?s=" + queryParam;\n\n    try {\n        const results = [];\n        const seen = new Set();\n        const pages = [];\n        const queued = new Set();\n\n        const addPage = url => {\n            if (!url || queued.has(url) || pages.length >= 10) return;\n            queued.add(url);\n            pages.push(url);\n        };\n\n        addPage(firstSearchUrl);\n\n        const collectPage = async url => {\n            const response = await axios.get(url, {\n                headers: getHeaders(RAREANIMES_BASE),\n                timeout: 12000,\n                maxRedirects: 5\n            });\n\n            const $ = cheerio.load(response.data);\n            const queryLower = cleanQuery.toLowerCase();\n\n            $("a[href]").each((index, element) => {\n                const title = $(element).text().replace(/\s+/g, " ").trim();\n                const href = $(element).attr("href");\n                if (!title || !href) return;\n\n                let link;\n                try {\n                    link = new URL(href, RAREANIMES_BASE).href;\n                } catch {\n                    return;\n                }\n\n                const parsed = new URL(link);\n                if (parsed.hostname !== "www.rareanimes.mov") return;\n                if (parsed.pathname === "/" && !parsed.searchParams.has("s")) return;\n\n                const blockedPaths = [\n                    "/category/",\n                    "/tag/",\n                    "/page/",\n                    "/author/",\n                    "/search/"\n                ];\n\n                if (blockedPaths.some(path => parsed.pathname.includes(path))) return;\n                if (parsed.searchParams.has("s") || parsed.searchParams.has("url")) return;\n                if (!title.toLowerCase().includes(queryLower)) return;\n\n                link = fixUrl(link);\n                if (seen.has(link)) return;\n\n                seen.add(link);\n                results.push({\n                    title,\n                    link,\n                    type: "series",\n                    source: "RareAnimes"\n                });\n            });\n\n            // WordPress pagination links are the authoritative way to discover\n            // older search-result pages. Queue only search pagination URLs.\n            $("a[href]").each((index, element) => {\n                const href = $(element).attr("href");\n                if (!href) return;\n\n                try {\n                    const absolute = new URL(href, RAREANIMES_BASE);\n                    const text = $(element).text().replace(/\s+/g, " ").trim();\n                    const isPagination =\n                        /(?:page|paged|next|older|newer)/i.test(text) ||\n                        /(?:\/page\/\d+\/|[?&]paged=\d+)/i.test(absolute.href);\n\n                    if (\n                        isPagination &&\n                        absolute.hostname === "www.rareanimes.mov" &&\n                        absolute.searchParams.has("s")\n                    ) {\n                        addPage(absolute.href);\n                    }\n                } catch {}\n            });\n\n            return $;\n        };\n\n        // First page can expose the complete pagination map.\n        await collectPage(firstSearchUrl);\n\n        // Follow discovered pagination links. The queue can grow while pages\n        // are processed, but is capped to avoid an unbounded crawl.\n        for (let i = 1; i < pages.length && i < 10; i++) {\n            try {\n                await collectPage(pages[i]);\n            } catch (err) {\n                console.error("[RareAnimes] Search page failed:", pages[i], err.message);\n            }\n        }\n\n        // If the theme did not expose pagination links, probe the standard\n        // WordPress paged query for a small bounded range.\n        if (pages.length === 1) {\n            for (let page = 2; page <= 6; page++) {\n                const url =\n                    RAREANIMES_BASE +\n                    "/?s=" +\n                    queryParam +\n                    "&paged=" +\n                    page;\n\n                try {\n                    await collectPage(url);\n                } catch (err) {\n                    console.error("[RareAnimes] Fallback search page failed:", page, err.message);\n                }\n            }\n        }\n\n        // Keep RareAnimes seasons in numeric order. This prevents the bot from\n        // showing Season 04 before Season 01 merely because of source ordering.\n        results.sort((a, b) => {\n            const am = a.title.match(/\bseason\s*[- ]?(\d+)\b/i);\n            const bm = b.title.match(/\bseason\s*[- ]?(\d+)\b/i);\n\n            if (am && bm) return Number(am[1]) - Number(bm[1]);\n            if (am) return -1;\n            if (bm) return 1;\n            return a.title.localeCompare(b.title);\n        });\n\n        return results.slice(0, 50);\n    } catch (err) {\n        console.error("[RareAnimes] Search failed:", err.message);\n        return [];\n    }\n};\n\nconst getRareAnimesEpisodes = (html) => {
+const searchRareAnimes = async (query) => {
+    const cleanQuery = String(query || "").trim();
+    if (!cleanQuery) return [];
+
+    const searchUrl = RAREANIMES_BASE + "/?s=" + encodeURIComponent(cleanQuery);
+
+    try {
+        const results = [];
+        const seen = new Set();
+        const pages = [];
+        const queued = new Set();
+
+        const addPage = (url) => {
+            if (!url || queued.has(url) || pages.length >= 10) return;
+            queued.add(url);
+            pages.push(url);
+        };
+
+        const collectPage = async (url) => {
+            const response = await axios.get(url, {
+                headers: getHeaders(RAREANIMES_BASE),
+                timeout: 12000,
+                maxRedirects: 5
+            });
+
+            const $ = cheerio.load(response.data);
+            const queryLower = cleanQuery.toLowerCase();
+
+            $("a[href]").each((index, element) => {
+                const title = $(element).text().replace(/\s+/g, " ").trim();
+                const href = $(element).attr("href");
+                if (!title || !href) return;
+
+                let link;
+                try {
+                    link = new URL(href, RAREANIMES_BASE).href;
+                } catch {
+                    return;
+                }
+
+                const parsed = new URL(link);
+                if (parsed.hostname !== "www.rareanimes.mov") return;
+                if (parsed.pathname === "/" && !parsed.searchParams.has("s")) return;
+
+                const blockedPaths = [
+                    "/category/",
+                    "/tag/",
+                    "/page/",
+                    "/author/",
+                    "/search/"
+                ];
+
+                if (blockedPaths.some((path) => parsed.pathname.includes(path))) return;
+                if (parsed.searchParams.has("s") || parsed.searchParams.has("url")) return;
+                if (!title.toLowerCase().includes(queryLower)) return;
+
+                link = fixUrl(link);
+                if (seen.has(link)) return;
+
+                seen.add(link);
+                results.push({
+                    title,
+                    link,
+                    type: "series",
+                    source: "RareAnimes"
+                });
+            });
+
+            $("a[href]").each((index, element) => {
+                const href = $(element).attr("href");
+                if (!href) return;
+
+                try {
+                    const absolute = new URL(href, RAREANIMES_BASE);
+                    const text = $(element).text().replace(/\s+/g, " ").trim();
+                    const isPagination =
+                        /(?:page|paged|next|older|newer)/i.test(text) ||
+                        /(?:\/page\/\d+\/|[?&]paged=\d+)/i.test(absolute.href);
+
+                    if (
+                        isPagination &&
+                        absolute.hostname === "www.rareanimes.mov" &&
+                        absolute.searchParams.has("s")
+                    ) {
+                        addPage(absolute.href);
+                    }
+                } catch {}
+            });
+        };
+
+        addPage(searchUrl);
+        await collectPage(searchUrl);
+
+        for (let i = 1; i < pages.length && i < 10; i++) {
+            try {
+                await collectPage(pages[i]);
+            } catch (err) {
+                console.error("[RareAnimes] Search page failed:", pages[i], err.message);
+            }
+        }
+
+        if (pages.length === 1) {
+            for (let page = 2; page <= 6; page++) {
+                const url =
+                    RAREANIMES_BASE +
+                    "/?s=" +
+                    encodeURIComponent(cleanQuery) +
+                    "&paged=" +
+                    page;
+
+                try {
+                    await collectPage(url);
+                } catch (err) {
+                    console.error("[RareAnimes] Fallback search page failed:", page, err.message);
+                }
+            }
+        }
+
+        results.sort((a, b) => {
+            const am = a.title.match(/\bseason\s*[- ]?(\d+)\b/i);
+            const bm = b.title.match(/\bseason\s*[- ]?(\d+)\b/i);
+
+            if (am && bm) return Number(am[1]) - Number(bm[1]);
+            if (am) return -1;
+            if (bm) return 1;
+            return a.title.localeCompare(b.title);
+        });
+
+        return results.slice(0, 50);
+    } catch (err) {
+        console.error("[RareAnimes] Search failed:", err.message);
+        return [];
+    }
+};
+
+const getRareAnimesEpisodes = (html) => {
     const relatedData = extractRareAnimesRelatedData(html);
     const seasons = [];
 
