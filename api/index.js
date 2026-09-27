@@ -1960,6 +1960,70 @@ app.get('/rareanimes/debug-content', async (req, res) => {
 });
 
 /* =========================================
+   RAREANIMES LINK DEBUG
+   ========================================= */
+
+app.get('/rareanimes/debug-links', async (req, res) => {
+    const rawUrl = req.query.url;
+
+    if (!rawUrl) {
+        return res.status(400).json({ error: "URL is required" });
+    }
+
+    try {
+        const page = await fetchRareAnimesPage(rawUrl);
+        const html = String(page.data || "");
+        const $ = cheerio.load(html);
+
+        const hrefs = [];
+        const onclicks = [];
+        const scripts = [];
+
+        $('a[href]').each((i, el) => {
+            const href = $(el).attr('href') || '';
+            const text = $(el).text().replace(/\s+/g, ' ').trim();
+
+            if (
+                /[?&]url=/i.test(href) ||
+                /episode|ep\b|watch|play/i.test(text) ||
+                /[?&]url=/i.test($(el).attr('onclick') || '')
+            ) {
+                hrefs.push({
+                    text: text.slice(0, 160),
+                    href: href.slice(0, 500),
+                    onclick: ($(el).attr('onclick') || '').slice(0, 700)
+                });
+            }
+        });
+
+        $('[onclick]').each((i, el) => {
+            const onclick = $(el).attr('onclick') || '';
+            if (/url=|episode|ep\b|watch|play/i.test(onclick)) {
+                onclicks.push(onclick.slice(0, 1000));
+            }
+        });
+
+        $('script').each((i, el) => {
+            const text = $(el).html() || '';
+            if (/url=|episode|SEA_|watch|play/i.test(text)) {
+                scripts.push(text.slice(0, 3000));
+            }
+        });
+
+        res.json({
+            success: true,
+            final_url: page.url,
+            html_length: html.length,
+            href_matches: hrefs.slice(0, 100),
+            onclick_matches: [...new Set(onclicks)].slice(0, 50),
+            script_matches: scripts.slice(0, 20)
+        });
+    } catch (err) {
+        handleScraperError(res, err, "RareAnimes link debug failed");
+    }
+});
+
+/* =========================================
    RAREANIMES PUBLIC PLAYER LINKS
    ========================================= */
 
