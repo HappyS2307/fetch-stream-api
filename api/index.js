@@ -680,7 +680,6 @@ const extractRareAnimesRelatedData = (html) => {
     const markerIndex = source.indexOf(marker);
 
     if (markerIndex === -1) {
-        console.error("[RareAnimes] relatedData marker not found");
         return {};
     }
 
@@ -753,7 +752,7 @@ const extractRareAnimesRelatedData = (html) => {
 };
 
 
-const extractRareAnimesArgonEmbed = ($) => {
+const extractRareAnimesArgonEmbed = ($, html = "") => {
     let src = null;
 
     $('iframe').each((index, element) => {
@@ -767,7 +766,11 @@ const extractRareAnimesArgonEmbed = ($) => {
         if (!candidate) return;
 
         try {
-            const absolute = new URL(candidate, RAREANIMES_BASE).href;
+            const absolute = new URL(
+                candidate,
+                RAREANIMES_BASE
+            ).href;
+
             const parsed = new URL(absolute);
 
             if (
@@ -779,11 +782,26 @@ const extractRareAnimesArgonEmbed = ($) => {
         } catch {}
     });
 
+    if (!src) {
+        const source = String(html || '')
+            .replace(/\\\//g, '/')
+            .replace(/\\u0026/g, '&');
+
+        const match = source.match(
+            /https?:\\/\\/argon\\.razorshell\\.space\\/embed\\/[^"'\\s<>]+/i
+        );
+
+        if (match) {
+            src = match[0];
+        }
+    }
+
     if (!src) return null;
 
     let language = 'Default';
+
     const langText =
-        $('.badge-lang').first().text().replace(/\s+/g, ' ').trim();
+        $('.badge-lang').first().text().replace(/\\s+/g, ' ').trim();
 
     if (langText) {
         language = langText;
@@ -798,6 +816,31 @@ const extractRareAnimesArgonEmbed = ($) => {
     };
 };
 
+const extractRareAnimesEpisodePageLink = (rawUrl) => {
+    if (!rawUrl) return null;
+
+    try {
+        const parsed = new URL(rawUrl, RAREANIMES_BASE);
+
+        const episodeId =
+            parsed.searchParams.get('url') ||
+            parsed.searchParams.get('episode') ||
+            parsed.searchParams.get('id');
+
+        if (!episodeId) {
+            return null;
+        }
+
+        return (
+            RAREANIMES_BASE +
+            '/?url=' +
+            encodeURIComponent(episodeId)
+        );
+    } catch {
+        return null;
+    }
+};
+
 const loadRareAnimesEpisodeById = async (episodeId) => {
     if (!episodeId) return null;
 
@@ -808,13 +851,14 @@ const loadRareAnimesEpisodeById = async (episodeId) => {
 
     try {
         const page = await fetchRareAnimesPage(episodeUrl);
-        const $ = cheerio.load(page.data);
-        const stream = extractRareAnimesArgonEmbed($);
+        const html = String(page.data || '');
+        const $ = cheerio.load(html);
+        const stream = extractRareAnimesArgonEmbed($, html);
 
         if (!stream) return null;
 
         const title =
-            $('h1').first().text().replace(/\s+/g, ' ').trim() ||
+            $('h1').first().text().replace(/\\s+/g, ' ').trim() ||
             null;
 
         return {
@@ -2478,17 +2522,32 @@ app.get('/rareanimes/streams', async (req, res) => {
 
     try {
         const page = await fetchRareAnimesPage(rawUrl);
-        const $ = cheerio.load(page.data);
+        const html = String(page.data || '');
+        const $ = cheerio.load(html);
 
         const title =
-            $('h1').first().text().replace(/\s+/g, ' ').trim() || null;
+            $('h1').first().text().replace(/\\s+/g, ' ').trim() ||
+            null;
+
+        const argon = extractRareAnimesArgonEmbed($, html);
+
+        if (argon) {
+            return res.json({
+                source: 'RareAnimes',
+                title,
+                streams: [argon],
+                total_streams: 1,
+                source_base: RAREANIMES_BASE,
+                player: 'Argon'
+            });
+        }
 
         const streams = [];
         const seen = new Set();
 
         $('a[href]').each((index, element) => {
             let href = $(element).attr('href');
-            const label = $(element).text().replace(/\s+/g, ' ').trim();
+            const label = $(element).text().replace(/\\s+/g, ' ').trim();
 
             if (!href || !label) return;
 
@@ -2502,12 +2561,17 @@ app.get('/rareanimes/streams', async (req, res) => {
             if (!isKnownPlayer) return;
 
             try {
-                href = new URL(href, page.url || RAREANIMES_BASE).href;
+                href = new URL(
+                    href,
+                    page.url || RAREANIMES_BASE
+                ).href;
             } catch {
                 return;
             }
 
-            if (!/^https?:\/\//i.test(href) || seen.has(href)) return;
+            if (!/^https?:\\/\\//i.test(href) || seen.has(href)) {
+                return;
+            }
 
             seen.add(href);
 
@@ -2522,54 +2586,14 @@ app.get('/rareanimes/streams', async (req, res) => {
             });
         });
 
-        $('iframe').each((index, element) => {
-            let src =
-                $(element).attr('src') ||
-                $(element).attr('data-src') ||
-                $(element).attr('data-lazy-src');
-
-            if (!src || src === 'about:blank') return;
-
-            try {
-                src = new URL(src, page.url || RAREANIMES_BASE).href;
-            } catch {
-                return;
-            }
-
-            const parsed = new URL(src);
-
-            if (
-                parsed.hostname === 'www.rareanimes.mov' ||
-                parsed.hostname === 'rareanimes.mov' ||
-                parsed.hostname === 'wsrv.nl' ||
-                parsed.hostname === 'www.google.com'
-            ) {
-                return;
-            }
-
-            if (seen.has(src)) return;
-
-            seen.add(src);
-
-            streams.push({
-                server:
-                    parsed.hostname === 'argon.razorshell.space' &&
-                    parsed.pathname.startsWith('/embed/')
-                        ? 'Argon'
-                        : 'Player ' + String(streams.length + 1),
-                language: 'Default',
-                link: src,
-                type: 'embed',
-                public: true
-            });
-        });
-
         res.json({
             source: 'RareAnimes',
             title,
             streams,
             total_streams: streams.length,
-            source_base: RAREANIMES_BASE
+            source_base: RAREANIMES_BASE,
+            player: 'public-player-fallback',
+            argon_available: false
         });
     } catch (err) {
         handleScraperError(
@@ -2579,6 +2603,47 @@ app.get('/rareanimes/streams', async (req, res) => {
         );
     }
 });
+
+// Dedicated resolver for an actual public RareAnimes episode page.
+app.get('/rareanimes/argon', async (req, res) => {
+    const rawUrl = req.query.url;
+
+    if (!rawUrl) {
+        return res.status(400).json({
+            error: "URL is required"
+        });
+    }
+
+    try {
+        const page = await fetchRareAnimesPage(rawUrl);
+        const html = String(page.data || '');
+        const $ = cheerio.load(html);
+        const argon = extractRareAnimesArgonEmbed($, html);
+
+        if (!argon) {
+            return res.status(404).json({
+                source: 'RareAnimes',
+                found: false,
+                message: 'No public Argon embed is exposed on this episode page.',
+                episode_url: rawUrl
+            });
+        }
+
+        res.json({
+            source: 'RareAnimes',
+            found: true,
+            episode_url: rawUrl,
+            stream: argon
+        });
+    } catch (err) {
+        handleScraperError(
+            res,
+            err,
+            'Failed to resolve public Argon embed'
+        );
+    }
+});
+
 
 // ==========================================
 // TMDB EPISODE THUMBNAIL
