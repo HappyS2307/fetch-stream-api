@@ -2577,7 +2577,7 @@ app.get('/rareanimes/streams', async (req, res) => {
                 return;
             }
 
-            if (!/^https?:\\/\\//i.test(href) || seen.has(href)) {
+            if ((!href.startsWith('http://') && !href.startsWith('https://')) || seen.has(href)) {
                 return;
             }
 
