@@ -848,25 +848,120 @@ const extractPublicArgonLinksFromHtml = (html, baseUrl = RAREANIMES_BASE) => {
     return links;
 };
 
+const extractRareAnimesArgonLinks = ($, html = "", baseUrl = RAREANIMES_BASE) => {
+    const links = [];
+    const seen = new Set();
+
+    const addCandidate = (candidate) => {
+        if (!candidate) return;
+
+        const clean = String(candidate)
+            .trim()
+            .replace(/[)"'<>;,]+$/g, "");
+
+        try {
+            const absolute = new URL(clean, baseUrl).href;
+            const parsed = new URL(absolute);
+
+            if (
+                parsed.hostname.toLowerCase() !== "argon.razorshell.space" ||
+                !parsed.pathname.toLowerCase().startsWith("/embed/")
+            ) {
+                return;
+            }
+
+            if (seen.has(absolute)) return;
+
+            seen.add(absolute);
+            links.push(absolute);
+        } catch {}
+    };
+
+    // Primary: only public player iframe attributes on the exact page.
+    $("iframe[src], iframe[data-src], iframe[data-lazy-src]").each((_, element) => {
+        addCandidate(
+            $(element).attr("src") ||
+            $(element).attr("data-src") ||
+            $(element).attr("data-lazy-src")
+        );
+    });
+
+    if (links.length) return links;
+
+    // Fallback: inspect only small regions around player markers.
+    const source = String(html || "")
+        .replace(/\\\\\//g, "/")
+        .replace(/\\\\u0026/g, "&");
+
+    const markers = [
+        'id="videoPlayer"',
+        "id='videoPlayer'",
+        'id="player"',
+        "id='player'",
+        "playerSources",
+        "stream_url"
+    ];
+
+    const argonMarker = "https://argon.razorshell.space/embed/";
+
+    for (const marker of markers) {
+        let offset = 0;
+
+        while (offset < source.length) {
+            const markerIndex = source.indexOf(marker, offset);
+            if (markerIndex === -1) break;
+
+            const start = Math.max(0, markerIndex - 2500);
+            const end = Math.min(source.length, markerIndex + 5000);
+            const region = source.slice(start, end);
+
+            let scan = 0;
+
+            while (scan < region.length) {
+                const index = region.indexOf(argonMarker, scan);
+                if (index === -1) break;
+
+                let idEnd = index + argonMarker.length;
+
+                while (
+                    idEnd < region.length &&
+                    /[A-Za-z0-9_-]/.test(region[idEnd])
+                ) {
+                    idEnd++;
+                }
+
+                addCandidate(region.slice(index, idEnd));
+                scan = idEnd;
+            }
+
+            offset = markerIndex + marker.length;
+        }
+
+        if (links.length) break;
+    }
+
+    return links;
+};
+
 const extractRareAnimesArgonEmbed = ($, html = "", baseUrl = RAREANIMES_BASE) => {
-    const links = extractPublicArgonLinksFromHtml(html, baseUrl);
+    const links = extractRareAnimesArgonLinks($, html, baseUrl);
 
     if (!links.length) return null;
 
-    let language = 'Default';
+    let language = "Default";
 
     try {
         const langText =
-            $('.badge-lang').first().text().replace(/\\s+/g, ' ').trim();
+            $(".badge-lang").first().text().replace(/\\s+/g, " ").trim();
 
         if (langText) language = langText;
     } catch {}
 
     return {
-        server: 'Argon',
+        server: "Argon",
         language,
         link: links[0],
-        type: 'embed',
+        type: "embed",
         public: true
     };
 };
