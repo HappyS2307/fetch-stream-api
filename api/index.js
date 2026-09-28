@@ -674,83 +674,51 @@ const fetchRareAnimesPage = async (rawUrl) => {
 };
 
 const extractRareAnimesRelatedData = (html) => {
-    const source = String(html || "");
+    const source = String(html || '');
+    const names = ['relatedData', 'trendingData', 'groupedHistory'];
 
-    const marker = "const relatedData";
-    const markerIndex = source.indexOf(marker);
-
-    if (markerIndex === -1) {
-        return {};
-    }
-
-    const start = source.indexOf("{", markerIndex);
-
-    if (start === -1) {
-        console.error("[RareAnimes] relatedData object start not found");
-        return {};
-    }
-
-    let depth = 0;
-    let inString = false;
-    let escaped = false;
-    let end = -1;
-
-    for (let i = start; i < source.length; i++) {
-        const char = source[i];
-
-        if (inString) {
-            if (escaped) {
-                escaped = false;
+    const parseObjectAfter = (index) => {
+        const start = source.indexOf('{', index);
+        if (start === -1) return null;
+        let depth = 0;
+        let quote = null;
+        let escaped = false;
+        for (let i = start; i < source.length; i++) {
+            const ch = source[i];
+            if (quote) {
+                if (escaped) { escaped = false; continue; }
+                if (ch === '\\') { escaped = true; continue; }
+                if (ch === quote) quote = null;
                 continue;
             }
-
-            if (char === "\\") {
-                escaped = true;
-                continue;
+            if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+            if (ch === '{') depth++;
+            else if (ch === '}') {
+                depth--;
+                if (depth === 0) {
+                    try { return JSON.parse(source.slice(start, i + 1)); } catch {}
+                    return null;
+                }
             }
-
-            if (char === '"') {
-                inString = false;
-            }
-
-            continue;
         }
+        return null;
+    };
 
-        if (char === '"') {
-            inString = true;
-            continue;
-        }
-
-        if (char === "{") {
-            depth++;
-        } else if (char === "}") {
-            depth--;
-
-            if (depth === 0) {
-                end = i + 1;
-                break;
-            }
+    for (const name of names) {
+        const patterns = [
+            new RegExp('(?:const|let|var)\\s+' + name + '\\s*='),
+            new RegExp('(?:window\\.|globalThis\\.)' + name + '\\s*=')
+        ];
+        for (const pattern of patterns) {
+            const match = pattern.exec(source);
+            if (!match) continue;
+            const parsed = parseObjectAfter(match.index + match[0].length);
+            if (parsed && typeof parsed === 'object') return parsed;
         }
     }
 
-    if (end === -1) {
-        console.error("[RareAnimes] relatedData object end not found");
-        return {};
-    }
-
-    const jsonText = source.slice(start, end);
-
-    try {
-        return JSON.parse(jsonText);
-    } catch (err) {
-        console.error(
-            "[RareAnimes] relatedData JSON parse failed:",
-            err.message
-        );
-        return {};
-    }
+    return {};
 };
-
 
 const extractPublicArgonLinksFromHtml = (html, baseUrl = RAREANIMES_BASE) => {
     const links = [];
