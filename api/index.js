@@ -784,47 +784,65 @@ const extractPublicArgonLinksFromHtml = (html, baseUrl = RAREANIMES_BASE) => {
         } catch {}
     };
 
-    // Scan text without a regex literal for the Argon host. This avoids
-    // startup/parser issues caused by escaped slash regex literals.
-    const marker = 'https://argon.razorshell.space/embed/';
-    let offset = 0;
+    // PRIMARY: only player iframe attributes. This prevents Argon URLs from
+    // related/recommended episode cards from being mistaken for the selected
+    // episode's player.
+    const $ = cheerio.load(source);
+    $('iframe[src], iframe[data-src], iframe[data-lazy-src]').each((_, el) => {
+        addCandidate(
+            $(el).attr('src') ||
+            $(el).attr('data-src') ||
+            $(el).attr('data-lazy-src')
+        );
+    });
 
-    while (offset < source.length) {
-        const index = source.indexOf(marker, offset);
-        if (index === -1) break;
+    if (links.length) return links;
 
-        let end = index + marker.length;
+    // SECONDARY: some pages expose the player URL in inline JS. Only inspect
+    // small player-related regions instead of scanning the entire page.
+    const markers = [
+        'id="videoPlayer"',
+        "id='videoPlayer'",
+        'id="player"',
+        "id='player'",
+        'playerSources',
+        'stream_url'
+    ];
 
-        while (
-            end < source.length &&
-            /[A-Za-z0-9_-]/.test(source[end])
-        ) {
-            end++;
+    for (const marker of markers) {
+        let offset = 0;
+
+        while (offset < source.length) {
+            const index = source.indexOf(marker, offset);
+            if (index === -1) break;
+
+            const start = Math.max(0, index - 2500);
+            const end = Math.min(source.length, index + 5000);
+            const region = source.slice(start, end);
+
+            const argonMarker = 'https://argon.razorshell.space/embed/';
+            let scan = 0;
+
+            while (scan < region.length) {
+                const matchIndex = region.indexOf(argonMarker, scan);
+                if (matchIndex === -1) break;
+
+                let idEnd = matchIndex + argonMarker.length;
+                while (
+                    idEnd < region.length &&
+                    /[A-Za-z0-9_-]/.test(region[idEnd])
+                ) {
+                    idEnd++;
+                }
+
+                addCandidate(region.slice(matchIndex, idEnd));
+                scan = idEnd;
+            }
+
+            offset = index + marker.length;
         }
 
-        addCandidate(source.slice(index, end));
-        offset = end;
-    }
-
-    // Also inspect protocol-relative Argon URLs if a page exposes one.
-    const protocolRelativeMarker = '//argon.razorshell.space/embed/';
-    offset = 0;
-
-    while (offset < source.length) {
-        const index = source.indexOf(protocolRelativeMarker, offset);
-        if (index === -1) break;
-
-        let end = index + protocolRelativeMarker.length;
-
-        while (
-            end < source.length &&
-            /[A-Za-z0-9_-]/.test(source[end])
-        ) {
-            end++;
-        }
-
-        addCandidate('https:' + source.slice(index, end));
-        offset = end;
+        if (links.length) break;
     }
 
     return links;
@@ -1138,37 +1156,32 @@ const loadRareAnimesSeason = async (season) => {
         ? season.episodes
         : [];
 
-    const results = [];
-    const concurrency = 6;
+    // IMPORTANT: preserve the exact episode ID supplied by relatedData.
+    // Do not resolve/fetch episode pages while building the episode list.
+    // The selected episode will be resolved later from its exact URL.
+    return sourceEpisodes
+        .filter(item => item && item.id)
+        .map((item, index) => {
+            const episodeId = String(item.id);
+            const fallbackNum = index + 1;
+            const epNum = Number(item.e) || fallbackNum;
 
-    for (let i = 0; i < sourceEpisodes.length; i += concurrency) {
-        const batch = sourceEpisodes.slice(i, i + concurrency);
-
-        const loaded = await Promise.all(
-            batch.map(async (item, batchIndex) => {
-                const resolved = await loadRareAnimesEpisodeById(item.id);
-
-                if (!resolved) return null;
-
-                const fallbackNum =
-                    i + batchIndex + 1;
-
-                return {
-                    epNum: Number(item.e || 0) || fallbackNum,
-                    title:
-                        item.ep_name ||
-                        resolved.title ||
-                        ('Episode ' + (item.e || fallbackNum)),
-                    link: resolved.link,
-                    streams: (resolved.codedewLinks || []).concat(resolved.stream ? [resolved.stream] : [])
-                };
-            })
-        );
-
-        results.push(...loaded.filter(Boolean));
-    }
-
-    return results.sort((a, b) => a.epNum - b.epNum);
+            return {
+                epNum,
+                title: item.ep_name || ('Episode ' + epNum),
+                episodeId,
+                episodeUrl:
+                    RAREANIMES_BASE +
+                    '/?url=' +
+                    encodeURIComponent(episodeId),
+                link:
+                    RAREANIMES_BASE +
+                    '/?url=' +
+                    encodeURIComponent(episodeId),
+                streams: []
+            };
+        })
+        .sort((a, b) => a.epNum - b.epNum);
 };
 
 const searchRareAnimes = async (query) => {
