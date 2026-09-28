@@ -2704,20 +2704,58 @@ const extractCodedewPublicPlayerSources = async (codedewUrl, refererUrl = RAREAN
     };
 
     const scripts = $('script').map((_, el) => $(el).html() || '').get();
+
     for (const script of scripts) {
-        const match = script.match(/(?:let|const|var)\s+playerSources\s*=\s*(\[[\s\S]*?\])\s*;/);
-        if (!match) continue;
-        try {
-            const playerSources = JSON.parse(match[1]);
-            if (!Array.isArray(playerSources)) continue;
-            for (const item of playerSources) {
-                if (!item || typeof item !== 'object') continue;
-                add(item.url, item.name || item.server || item.label, item.language || item.lang);
-            }
-        } catch (err) {
-            console.log('[RareAnimes] Failed to parse Codedew playerSources:', err.message);
+        // Do not JSON.parse the whole array: Codedew source can contain very
+        // long escaped URLs and formatting/newlines that make array parsing
+        // brittle. Instead isolate playerSources and extract each public
+        // "url" property directly from the source.
+        const blockMatch = script.match(
+            /(?:let|const|var)\s+playerSources\s*=\s*\[/i
+        );
+
+        if (!blockMatch) continue;
+
+        const start = blockMatch.index;
+        const end = script.indexOf('];', start);
+        if (start < 0 || end < 0) continue;
+
+        const block = script.slice(start, end + 1);
+
+        const urlMatches = block.matchAll(
+            /"url"\s*:\s*"((?:\\\\.|[^"\\\\])*)"/g
+        );
+
+        for (const match of urlMatches) {
+            try {
+                const raw = JSON.parse('"' + match[1] + '"');
+                add(raw, undefined, 'Default');
+            } catch {}
+        }
+
+        // Capture the provider name belonging to each object when possible.
+        // Re-run object-by-object so V1/V2/V3/V4 labels remain useful.
+        const objectMatches = block.matchAll(
+            /\{([\\s\\S]*?)\}/g
+        );
+
+        for (const objectMatch of objectMatches) {
+            const objectText = objectMatch[1];
+            const urlMatch = objectText.match(
+                /"url"\s*:\s*"((?:\\\\.|[^"\\\\])*)"/
+            );
+            if (!urlMatch) continue;
+
+            try {
+                const raw = JSON.parse('"' + urlMatch[1] + '"');
+                const nameMatch = objectText.match(
+                    /"name"\s*:\s*"([^"]*)"/
+                );
+                add(raw, nameMatch?.[1], 'Default');
+            } catch {}
         }
     }
+
     return sources;
 };
 
@@ -2746,8 +2784,7 @@ app.get('/rareanimes/streams', async (req, res) => {
 
         $('a[href]').each((_, element) => {
             const href = String($(element).attr('href') || '').trim();
-            const label = $(element).text().replace(/\s+/g, ' ').trim();
-            if (!href || !/watchmultiquality|hubcloud|watchnow|dlbeta/i.test(label)) return;
+            if (!href) return;
             try {
                 const absolute = new URL(href, page.url || RAREANIMES_BASE).href;
                 const parsed = new URL(absolute);
