@@ -2148,33 +2148,43 @@ app.get('/rareanimes/episodes', async (req, res) => {
         const html = String(page.data || "");
         const relatedData = extractRareAnimesRelatedData(html);
 
-        // RareAnimes season pages expose the selected season as SEA_N.
-        // Do NOT match against site-wide series/trending data.
         const seasonEntries = Object.entries(relatedData)
-            .filter(([key, value]) =>
-                /^SEA_\d+$/i.test(key) &&
+            .filter(([, value]) =>
                 value &&
-                Array.isArray(value.episodes)
+                Array.isArray(value.episodes) &&
+                value.episodes.some(ep => ep && ep.id)
             )
             .map(([key, value]) => {
-                const keySeason =
-                    Number(String(key).replace(/\D/g, "")) || 1;
-
                 const firstEpisode =
                     value.episodes.find(ep => ep && ep.id) || {};
 
+                const keyMatch =
+                    String(key).match(/(?:SEA_|SEASON[_ -]?)?(\d+)/i);
+
+                const titleMatch =
+                    String(value.title || value.name || "")
+                        .match(/season\s*[- ]?(\d+)/i);
+
                 const seasonNum =
                     Number(firstEpisode.s) ||
-                    keySeason;
+                    Number(keyMatch?.[1]) ||
+                    Number(titleMatch?.[1]) ||
+                    null;
 
                 return {
                     seasonKey: key,
                     seasonNum,
-                    name: value.title || ("Season " + seasonNum),
+                    name:
+                        value.title ||
+                        value.name ||
+                        (seasonNum ? "Season " + seasonNum : key),
                     poster: value.poster || null,
-                    episodes: value.episodes.filter(ep => ep && ep.id)
+                    episodes: value.episodes.filter(
+                        ep => ep && ep.id
+                    )
                 };
             })
+            .filter(entry => Number.isFinite(entry.seasonNum))
             .sort((a, b) => a.seasonNum - b.seasonNum);
 
         if (!seasonEntries.length) {
