@@ -818,101 +818,30 @@ const extractRareAnimesArgonEmbed = ($, html = "", baseUrl = RAREANIMES_BASE) =>
 
 const fetchPublicCodedewArgon = async (codedewUrl, refererUrl = RAREANIMES_BASE) => {
     if (!codedewUrl) return null;
-
     try {
         const parsed = new URL(codedewUrl);
-
-        if (
-            parsed.hostname !== 'codedew.com' ||
-            !parsed.pathname.startsWith('/zipper/')
-        ) {
-            return null;
-        }
-
+        if (parsed.hostname.toLowerCase() !== 'codedew.com' ||
+            !parsed.pathname.toLowerCase().startsWith('/zipper/')) return null;
         const response = await axios.get(codedewUrl, {
-            headers: {
-                ...getHeaders(refererUrl),
-                Referer: refererUrl
-            },
-            timeout: 10000,
-            maxRedirects: 5
+            headers: { ...getHeaders(refererUrl), Referer: refererUrl },
+            timeout: 12000, maxRedirects: 5
         });
-
         const html = String(response.data || '');
-        const $ = cheerio.load(html);
-
-        const extract = (candidate) => {
-            if (!candidate) return null;
-
-            try {
-                const absolute = new URL(
-                    String(candidate)
-                        .replace(/\\\//g, '/')
-                        .replace(/\\u0026/g, '&'),
-                    codedewUrl
-                ).href;
-
-                const parsedCandidate = new URL(absolute);
-
-                if (
-                    parsedCandidate.hostname === 'argon.razorshell.space' &&
-                    parsedCandidate.pathname.startsWith('/embed/')
-                ) {
-                    return absolute;
-                }
-            } catch {}
-
-            return null;
-        };
-
-        let argon = null;
-
-        $('iframe').each((index, element) => {
-            if (argon) return;
-
-            argon =
-                extract($(element).attr('src')) ||
-                extract($(element).attr('data-src')) ||
-                extract($(element).attr('data-lazy-src'));
-        });
-
-        if (!argon) {
-            const source = html
-                .replace(/\\\//g, '/')
-                .replace(/\\u0026/g, '&');
-
-            const marker = 'https://argon.razorshell.space/embed/';
-            const markerIndex = source.indexOf(marker);
-
-            if (markerIndex !== -1) {
-                let end = markerIndex + marker.length;
-
-                while (
-                    end < source.length &&
-                    !/[\\s"'<>]/.test(source[end])
-                ) {
-                    end++;
-                }
-
-                argon = extract(source.slice(markerIndex, end));
+        const links = extractPublicArgonLinksFromHtml(html, codedewUrl);
+        if (!links.length) {
+            const decoded = html.replace(/\\\//g, '/').replace(/\\u0026/g, '&')
+                .replace(/\\u003a/gi, ':').replace(/\\u002f/gi, '/').replace(/&amp;/gi, '&');
+            const matches = decoded.match(/(?:https?:)?\\/\\/argon\\.razorshell\\.space\\/embed\\/[A-Za-z0-9_-]+/gi) || [];
+            for (const match of matches) {
+                const candidateHtml = '<iframe src="' + match + '"></iframe>';
+                const candidate = extractPublicArgonLinksFromHtml(candidateHtml, codedewUrl);
+                if (candidate.length) return { server:'Argon', language:'Default', link:candidate[0], type:'embed', public:true, via:'Codedew public HTML' };
             }
         }
-
-        if (!argon) return null;
-
-        return {
-            server: 'Argon',
-            language: 'Default',
-            link: argon,
-            type: 'embed',
-            public: true,
-            via: 'Codedew public HTML'
-        };
+        if (!links.length) return null;
+        return { server:'Argon', language:'Default', link:links[0], type:'embed', public:true, via:'Codedew public HTML' };
     } catch (err) {
-        console.error(
-            '[RareAnimes] Codedew Argon lookup failed:',
-            err.message
-        );
+        console.error('[RareAnimes] Codedew Argon lookup failed:', err.message);
         return null;
     }
 };
