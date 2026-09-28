@@ -3026,12 +3026,14 @@ app.get('/rareanimes/streams', async (req, res) => {
         // episode. No season-page-wide Codedew scan occurs here.
         for (const codedewUrl of codedewCandidates) {
             try {
-                const sources = await extractCodedewPublicPlayerSources(
+                const source = await fetchPublicCodedewArgon(
                     codedewUrl,
                     resolved.link || rawUrl
                 );
 
-                addStreams(sources);
+                if (source?.link) {
+                    addStreams([source]);
+                }
             } catch (err) {
                 console.log(
                     '[RareAnimes] Exact-episode Codedew lookup failed:',
