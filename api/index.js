@@ -752,78 +752,80 @@ const extractRareAnimesRelatedData = (html) => {
 };
 
 
-const extractRareAnimesArgonEmbed = ($, html = "") => {
-    let src = null;
+const extractPublicArgonLinksFromHtml = (html, baseUrl = RAREANIMES_BASE) => {
+    const links = [];
+    const seen = new Set();
 
-    $('iframe').each((index, element) => {
-        if (src) return;
+    const add = (raw) => {
+        if (!raw || typeof raw !== 'string') return;
 
-        const candidate =
-            $(element).attr('src') ||
-            $(element).attr('data-src') ||
-            $(element).attr('data-lazy-src');
+        const normalized = raw
+            .replace(/\\\//g, '/')
+            .replace(/\\u0026/g, '&')
+            .replace(/&amp;/gi, '&')
+            .trim();
 
-        if (!candidate) return;
+        const matches = normalized.match(
+            /https?:\\/\\/argon\\.razorshell\\.space\\/embed\\/[A-Za-z0-9_-]+/ig
+        ) || [];
 
-        try {
-            const absolute = new URL(
-                candidate,
-                RAREANIMES_BASE
-            ).href;
+        for (const candidate of matches) {
+            try {
+                const url = new URL(candidate, baseUrl).href;
+                const parsed = new URL(url);
 
-            const parsed = new URL(absolute);
+                if (
+                    parsed.hostname.toLowerCase() !== 'argon.razorshell.space' ||
+                    !parsed.pathname.toLowerCase().startsWith('/embed/')
+                ) {
+                    continue;
+                }
 
-            if (
-                parsed.hostname === 'argon.razorshell.space' &&
-                parsed.pathname.startsWith('/embed/')
-            ) {
-                src = absolute;
-            }
-        } catch {}
+                if (seen.has(url)) continue;
+                seen.add(url);
+                links.push(url);
+            } catch {}
+        }
+    };
+
+    const source = String(html || '');
+    const $ = cheerio.load(source);
+
+    $('iframe, [src], [data-src], [data-lazy-src], [data-url], [data-href], [data-link], [onclick]').each((_, element) => {
+        const attrs = element.attribs || {};
+
+        for (const value of Object.values(attrs)) {
+            add(String(value || ''));
+        }
     });
 
-    if (!src) {
-        const source = String(html || '')
-            .replace(/\\\//g, '/')
-            .replace(/\\u0026/g, '&');
+    add(source);
 
-        const marker = 'https://argon.razorshell.space/embed/';
-        const markerIndex = source.indexOf(marker);
+    return links;
+};
 
-        if (markerIndex !== -1) {
-            let end = markerIndex + marker.length;
+const extractRareAnimesArgonEmbed = ($, html = "", baseUrl = RAREANIMES_BASE) => {
+    const links = extractPublicArgonLinksFromHtml(html, baseUrl);
 
-            while (
-                end < source.length &&
-                !/[\s"'<>]/.test(source[end])
-            ) {
-                end++;
-            }
-
-            src = source.slice(markerIndex, end);
-        }
-    }
-
-    if (!src) return null;
+    if (!links.length) return null;
 
     let language = 'Default';
 
-    const langText =
-        $('.badge-lang').first().text().replace(/\\s+/g, ' ').trim();
+    try {
+        const langText =
+            $('.badge-lang').first().text().replace(/\\s+/g, ' ').trim();
 
-    if (langText) {
-        language = langText;
-    }
+        if (langText) language = langText;
+    } catch {}
 
     return {
         server: 'Argon',
         language,
-        link: src,
+        link: links[0],
         type: 'embed',
         public: true
     };
 };
-
 
 
 const fetchPublicCodedewArgon = async (codedewUrl, refererUrl = RAREANIMES_BASE) => {
@@ -952,35 +954,59 @@ const extractRareAnimesEpisodePageLink = (rawUrl) => {
     }
 };
 
-const extractRareAnimesCodedewLinksFromPage = ($, baseUrl = RAREANIMES_BASE) => {
+const extractRareAnimesCodedewLinksFromPage = ($, baseUrl = RAREANIMES_BASE, html = '') => {
     const links = [];
     const seen = new Set();
 
-    $('a[href]').each((index, element) => {
-        const href = String($(element).attr('href') || '').trim();
-        if (!href) return;
+    const add = (raw) => {
+        if (!raw || typeof raw !== 'string') return;
 
-        try {
-            const absolute = new URL(href, baseUrl).href;
-            const parsed = new URL(absolute);
+        const normalized = raw
+            .replace(/\\\//g, '/')
+            .replace(/\\u0026/g, '&')
+            .replace(/&amp;/gi, '&');
 
-            if (
-                parsed.hostname.toLowerCase() !== 'codedew.com' ||
-                !parsed.pathname.toLowerCase().startsWith('/zipper/')
-            ) return;
+        const matches = normalized.match(
+            /https?:\\/\\/codedew\\.com\\/zipper\\/[^\\s"'<>]+/ig
+        ) || [];
 
-            if (seen.has(absolute)) return;
-            seen.add(absolute);
+        for (let candidate of matches) {
+            candidate = candidate.replace(/[),.;]+$/g, '');
 
-            links.push({
-                server: 'Codedew',
-                language: 'Default',
-                link: absolute,
-                type: 'source',
-                public: true
-            });
-        } catch {}
+            try {
+                const absolute = new URL(candidate, baseUrl).href;
+                const parsed = new URL(absolute);
+
+                if (
+                    parsed.hostname.toLowerCase() !== 'codedew.com' ||
+                    !parsed.pathname.toLowerCase().startsWith('/zipper/')
+                ) {
+                    continue;
+                }
+
+                if (seen.has(absolute)) continue;
+                seen.add(absolute);
+
+                links.push({
+                    server: 'Codedew',
+                    language: 'Default',
+                    link: absolute,
+                    type: 'source',
+                    public: true
+                });
+            } catch {}
+        }
+    };
+
+    $('a[href], [data-url], [data-href], [data-link], [data-src], [onclick]').each((_, element) => {
+        const attrs = element.attribs || {};
+
+        for (const value of Object.values(attrs)) {
+            add(String(value || ''));
+        }
     });
+
+    add(String(html || ''));
 
     return links;
 };
@@ -997,15 +1023,34 @@ const loadRareAnimesEpisodeById = async (episodeId) => {
         const page = await fetchRareAnimesPage(episodeUrl);
         const html = String(page.data || '');
         const $ = cheerio.load(html);
-        const stream = extractRareAnimesArgonEmbed($, html);
-        const codedewLinks = extractRareAnimesCodedewLinksFromPage($, page.url || episodeUrl);
+
+        const directArgonLinks = extractPublicArgonLinksFromHtml(
+            html,
+            page.url || episodeUrl
+        );
+
+        const streams = directArgonLinks.map((link) => ({
+            server: 'Argon',
+            language: 'Default',
+            link,
+            type: 'embed',
+            public: true,
+            via: 'RareAnimes episode public HTML'
+        }));
+
+        const codedewLinks = extractRareAnimesCodedewLinksFromPage(
+            $,
+            page.url || episodeUrl,
+            html
+        );
 
         const title =
             $('h1').first().text().replace(/\\s+/g, ' ').trim() ||
             null;
 
         return {
-            stream,
+            stream: streams[0] || null,
+            streams,
             codedewLinks,
             title,
             link: episodeUrl
@@ -2709,76 +2754,16 @@ const extractCodedewPublicPlayerSources = async (codedewUrl, refererUrl = RAREAN
     });
 
     const html = String(response.data || '');
-    const sources = [];
-    const seen = new Set();
+    const argonLinks = extractPublicArgonLinksFromHtml(html, codedewUrl);
 
-    const addArgon = (rawUrl) => {
-        if (!rawUrl || typeof rawUrl !== 'string') return;
-
-        let url;
-        try {
-            url = new URL(
-                rawUrl
-                    .replace(/\\\//g, '/')
-                    .replace(/\\u0026/g, '&'),
-                codedewUrl
-            ).href;
-        } catch {
-            return;
-        }
-
-        try {
-            const u = new URL(url);
-            if (
-                u.hostname.toLowerCase() !== 'argon.razorshell.space' ||
-                !u.pathname.toLowerCase().startsWith('/embed/')
-            ) {
-                return;
-            }
-        } catch {
-            return;
-        }
-
-        if (seen.has(url)) return;
-        seen.add(url);
-
-        sources.push({
-            server: 'Argon',
-            language: 'Default',
-            link: url,
-            type: 'embed',
-            public: true,
-            via: 'WatchQuality/Codedew public HTML'
-        });
-    };
-
-    // PRIMARY: WatchQuality/Codedew exposes the public Argon iframe directly.
-    const $ = cheerio.load(html);
-
-    $('iframe[src], iframe[data-src], iframe[data-lazy-src]').each((_, el) => {
-        addArgon(
-            $(el).attr('src') ||
-            $(el).attr('data-src') ||
-            $(el).attr('data-lazy-src')
-        );
-    });
-
-    // SECONDARY: some pages expose the Argon URL in inline HTML/JS instead
-    // of putting it directly in the iframe attribute.
-    const normalizedHtml = html
-        .replace(/\\\//g, '/')
-        .replace(/\\u0026/g, '&');
-
-    const argonPattern = new RegExp(
-        'https?://argon\\\\.razorshell\\\\.space/embed/[A-Za-z0-9_-]+',
-        'g'
-    );
-
-    for (const match of normalizedHtml.matchAll(argonPattern)) {
-        addArgon(match[0]);
-    }
-
-    return sources;
+    return argonLinks.map((link) => ({
+        server: 'Argon',
+        language: 'Default',
+        link,
+        type: 'embed',
+        public: true,
+        via: 'WatchQuality/Codedew public HTML'
+    }));
 };
 
 app.get('/rareanimes/codedew-public-sources', async (req, res) => {
@@ -2801,8 +2786,22 @@ app.get('/rareanimes/streams', async (req, res) => {
     }
 
     try {
-        // PRIMARY: resolve the exact RareAnimes episode page and extract
-        // the public Argon iframe exactly like the Naruto Shippuden case.
+        const streams = [];
+        const seen = new Set();
+
+        const addStreams = (items) => {
+            for (const item of items || []) {
+                if (!item?.link || seen.has(item.link)) continue;
+                seen.add(item.link);
+                streams.push({
+                    ...item,
+                    server: 'Argon',
+                    type: 'embed',
+                    public: true
+                });
+            }
+        };
+
         let episodeId = null;
 
         try {
@@ -2813,95 +2812,105 @@ app.get('/rareanimes/streams', async (req, res) => {
                 parsed.searchParams.get('id');
         } catch {}
 
+        let title = null;
+        const codedewCandidates = [];
+        const codedewSeen = new Set();
+
+        const addCodedewCandidates = (items) => {
+            for (const item of items || []) {
+                const link = String(item?.link || item || '').trim();
+                if (!link || codedewSeen.has(link)) continue;
+                codedewSeen.add(link);
+                codedewCandidates.push(link);
+            }
+        };
+
         if (episodeId) {
             const resolved = await loadRareAnimesEpisodeById(episodeId);
 
-            if (resolved?.stream?.link) {
-                return res.json({
-                    source: 'RareAnimes',
-                    title: resolved.title || null,
-                    streams: [{
-                        ...resolved.stream,
-                        via: 'RareAnimes episode HTML iframe'
-                    }],
-                    total_streams: 1,
-                    public_player_sources_found: true,
-                    player: 'Argon'
-                });
-            }
-
-            // Secondary: the same episode page may expose Codedew pages.
-            if (Array.isArray(resolved?.codedewLinks)) {
-                const streams = [];
-                const seen = new Set();
-
-                for (const codedew of resolved.codedewLinks) {
-                    try {
-                        const sources = await extractCodedewPublicPlayerSources(
-                            codedew.link || codedew,
-                            rawUrl
-                        );
-
-                        for (const source of sources) {
-                            if (seen.has(source.link)) continue;
-                            seen.add(source.link);
-                            streams.push(source);
-                        }
-                    } catch (err) {
-                        console.log(
-                            '[RareAnimes] Codedew fallback failed:',
-                            err.message
-                        );
-                    }
-                }
-
-                if (streams.length) {
-                    return res.json({
-                        source: 'RareAnimes',
-                        title: resolved.title || null,
-                        streams,
-                        total_streams: streams.length,
-                        public_player_sources_found: true,
-                        player: 'Codedew public playerSources'
-                    });
-                }
+            if (resolved) {
+                title = resolved.title || null;
+                addStreams(resolved.streams || (resolved.stream ? [resolved.stream] : []));
+                addCodedewCandidates(resolved.codedewLinks);
             }
         }
 
-        // Fallback for a normal RareAnimes page URL.
+        // Also inspect the requested page itself so no public Argon iframe is
+        // missed when the URL is already a normal RareAnimes episode URL.
         const page = await fetchRareAnimesPage(rawUrl);
         const html = String(page.data || '');
         const $ = cheerio.load(html);
 
-        const directArgon = extractRareAnimesArgonEmbed($, html);
+        addStreams(
+            extractPublicArgonLinksFromHtml(
+                html,
+                page.url || rawUrl
+            ).map((link) => ({
+                server: 'Argon',
+                language: 'Default',
+                link,
+                type: 'embed',
+                public: true,
+                via: 'RareAnimes public HTML'
+            }))
+        );
 
-        if (directArgon?.link) {
+        addCodedewCandidates(
+            extractRareAnimesCodedewLinksFromPage(
+                $,
+                page.url || rawUrl,
+                html
+            )
+        );
+
+        title =
+            title ||
+            $('h1').first().text().replace(/\\s+/g, ' ').trim() ||
+            null;
+
+        // Every linked WatchQuality/Codedew page is checked for every public
+        // Argon embed URL exposed in its HTML. No stream_url decoding is used.
+        for (const codedewUrl of codedewCandidates.slice(0, 20)) {
+            try {
+                const sources = await extractCodedewPublicPlayerSources(
+                    codedewUrl,
+                    rawUrl
+                );
+                addStreams(sources);
+            } catch (err) {
+                console.log(
+                    '[RareAnimes] Public WatchQuality/Codedew lookup failed:',
+                    codedewUrl,
+                    err.message
+                );
+            }
+        }
+
+        if (streams.length) {
             return res.json({
                 source: 'RareAnimes',
-                title: $('h1').first().text().replace(/\s+/g, ' ').trim() || null,
-                streams: [{
-                    ...directArgon,
-                    via: 'RareAnimes episode HTML iframe'
-                }],
-                total_streams: 1,
+                title,
+                streams,
+                total_streams: streams.length,
                 public_player_sources_found: true,
-                player: 'Argon'
+                player: 'Argon',
+                extraction: 'all public Argon embeds from episode and linked WatchQuality/Codedew HTML'
             });
         }
 
         return res.json({
             source: 'RareAnimes',
-            title: $('h1').first().text().replace(/\s+/g, ' ').trim() || null,
+            title,
             streams: [],
             total_streams: 0,
             public_player_sources_found: false,
-            message: 'No public player/embed URL was exposed on the RareAnimes episode page.'
+            message: 'No public Argon player/embed URL was exposed on the RareAnimes episode or linked WatchQuality/Codedew pages.'
         });
     } catch (err) {
         handleScraperError(
             res,
             err,
-            'Failed to extract public RareAnimes player URL'
+            'Failed to extract public RareAnimes player URLs'
         );
     }
 });
