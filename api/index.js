@@ -2140,6 +2140,7 @@ app.get('/rareanimes/episodes', async (req, res) => {
     const requestedSeason = req.query.season
         ? String(req.query.season)
         : null;
+    const requestedTitle = String(req.query.title || "").trim();
 
     if (!rawUrl) {
         return res.status(400).json({ error: "URL is required" });
@@ -2150,12 +2151,47 @@ app.get('/rareanimes/episodes', async (req, res) => {
         const html = String(page.data || "");
         const relatedData = extractRareAnimesRelatedData(html);
 
-        const seasonEntries = Object.entries(relatedData)
+        const normalizeAnimeName = (value) =>
+            String(value || "")
+                .toLowerCase()
+                .replace(/season\\s*[- ]?\\d+/g, "")
+                .replace(/[^a-z0-9]+/g, " ")
+                .replace(/\\s+/g, " ")
+                .trim();
+
+        const wantedName = normalizeAnimeName(requestedTitle);
+
+        const allEntries = Object.entries(relatedData)
             .filter(([, value]) =>
                 value &&
                 Array.isArray(value.episodes) &&
                 value.episodes.some(ep => ep && ep.id)
-            )
+            );
+
+        // relatedData can contain many unrelated site-wide series.
+        // Never select the first object. Match the requested anime first.
+        const matchedEntries = wantedName
+            ? allEntries.filter(([key, value]) => {
+                const candidates = [
+                    key,
+                    value.series_name,
+                    value.title,
+                    value.name
+                ].map(normalizeAnimeName);
+
+                return candidates.some(name =>
+                    name === wantedName ||
+                    name.includes(wantedName) ||
+                    wantedName.includes(name)
+                );
+            })
+            : [];
+
+        const sourceEntries = matchedEntries.length
+            ? matchedEntries
+            : (allEntries.length === 1 ? allEntries : []);
+
+        const seasonEntries = sourceEntries
             .map(([key, value]) => {
                 const first = value.episodes.find(ep => ep && ep.id) || {};
                 const seasonNum =
