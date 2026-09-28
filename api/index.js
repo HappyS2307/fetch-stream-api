@@ -952,6 +952,39 @@ const extractRareAnimesEpisodePageLink = (rawUrl) => {
     }
 };
 
+const extractRareAnimesCodedewLinksFromPage = ($, baseUrl = RAREANIMES_BASE) => {
+    const links = [];
+    const seen = new Set();
+
+    $('a[href]').each((index, element) => {
+        const href = String($(element).attr('href') || '').trim();
+        if (!href) return;
+
+        try {
+            const absolute = new URL(href, baseUrl).href;
+            const parsed = new URL(absolute);
+
+            if (
+                parsed.hostname.toLowerCase() !== 'codedew.com' ||
+                !parsed.pathname.toLowerCase().startsWith('/zipper/')
+            ) return;
+
+            if (seen.has(absolute)) return;
+            seen.add(absolute);
+
+            links.push({
+                server: 'Codedew',
+                language: 'Default',
+                link: absolute,
+                type: 'source',
+                public: true
+            });
+        } catch {}
+    });
+
+    return links;
+};
+
 const loadRareAnimesEpisodeById = async (episodeId) => {
     if (!episodeId) return null;
 
