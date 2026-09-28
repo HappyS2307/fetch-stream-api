@@ -726,14 +726,19 @@ const extractPublicArgonLinksFromHtml = (html, baseUrl = RAREANIMES_BASE) => {
     const source = String(html || '')
         .replace(/\\\//g, '/')
         .replace(/\\u0026/g, '&')
-        .replace(/&amp;/gi, '&');
+        .replace(/&amp;/gi, '&')
+        .replace(/\\u003a/gi, ':')
+        .replace(/\\u002f/gi, '/');
 
     const addCandidate = (candidate) => {
         if (!candidate) return;
 
-        const clean = String(candidate)
-            .trim()
-            .replace(/[)"'<>;,]+$/g, '');
+        let clean = String(candidate).trim();
+        try {
+            clean = decodeURIComponent(clean);
+        } catch {}
+
+        clean = clean.replace(/[)"'<>;,]+$/g, '');
 
         try {
             const url = new URL(clean, baseUrl).href;
@@ -742,75 +747,46 @@ const extractPublicArgonLinksFromHtml = (html, baseUrl = RAREANIMES_BASE) => {
             if (
                 parsed.hostname.toLowerCase() !== 'argon.razorshell.space' ||
                 !parsed.pathname.toLowerCase().startsWith('/embed/')
-            ) {
-                return;
-            }
+            ) return;
 
-            if (seen.has(url)) return;
-            seen.add(url);
-            links.push(url);
+            if (!seen.has(url)) {
+                seen.add(url);
+                links.push(url);
+            }
         } catch {}
     };
 
-    // PRIMARY: only player iframe attributes. This prevents Argon URLs from
-    // related/recommended episode cards from being mistaken for the selected
-    // episode's player.
     const $ = cheerio.load(source);
-    $('iframe[src], iframe[data-src], iframe[data-lazy-src]').each((_, el) => {
-        addCandidate(
-            $(el).attr('src') ||
-            $(el).attr('data-src') ||
-            $(el).attr('data-lazy-src')
-        );
+
+    // Exact episode player elements.
+    $('iframe, video, source, [data-src], [data-url], [data-link], [data-href]').each((_, el) => {
+        const attrs = [
+            $(el).attr('src'),
+            $(el).attr('data-src'),
+            $(el).attr('data-lazy-src'),
+            $(el).attr('data-url'),
+            $(el).attr('data-link'),
+            $(el).attr('data-href')
+        ];
+
+        for (const value of attrs) {
+            if (value && /argon\\.razorshell\\.space\\/embed\\//i.test(value)) {
+                addCandidate(value);
+            }
+        }
     });
 
-    if (links.length) return links;
-
-    // SECONDARY: some pages expose the player URL in inline JS. Only inspect
-    // small player-related regions instead of scanning the entire page.
-    const markers = [
-        'id="videoPlayer"',
-        "id='videoPlayer'",
-        'id="player"',
-        "id='player'",
-        'playerSources',
-        'stream_url'
+    // Inline JS / JSON fallback, scoped to Argon URLs on this exact episode
+    // document. This is deliberately NOT used on season pages.
+    const patterns = [
+        /https?:\\/\\/argon\\.razorshell\\.space\\/embed\\/[A-Za-z0-9_-]+/gi,
+        /\\/\\/argon\\.razorshell\\.space\\/embed\\/[A-Za-z0-9_-]+/gi,
+        /https:\\\\/\\\\/argon\\\\.razorshell\\\\.space\\\\/embed\\\\/[A-Za-z0-9_-]+/gi
     ];
 
-    for (const marker of markers) {
-        let offset = 0;
-
-        while (offset < source.length) {
-            const index = source.indexOf(marker, offset);
-            if (index === -1) break;
-
-            const start = Math.max(0, index - 2500);
-            const end = Math.min(source.length, index + 5000);
-            const region = source.slice(start, end);
-
-            const argonMarker = 'https://argon.razorshell.space/embed/';
-            let scan = 0;
-
-            while (scan < region.length) {
-                const matchIndex = region.indexOf(argonMarker, scan);
-                if (matchIndex === -1) break;
-
-                let idEnd = matchIndex + argonMarker.length;
-                while (
-                    idEnd < region.length &&
-                    /[A-Za-z0-9_-]/.test(region[idEnd])
-                ) {
-                    idEnd++;
-                }
-
-                addCandidate(region.slice(matchIndex, idEnd));
-                scan = idEnd;
-            }
-
-            offset = index + marker.length;
-        }
-
-        if (links.length) break;
+    for (const pattern of patterns) {
+        const matches = source.match(pattern) || [];
+        for (const match of matches) addCandidate(match);
     }
 
     return links;
