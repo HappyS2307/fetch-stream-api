@@ -2661,101 +2661,65 @@ const extractCodedewPublicPlayerSources = async (codedewUrl, refererUrl = RAREAN
     if (parsed.hostname.toLowerCase() !== 'codedew.com' || !parsed.pathname.toLowerCase().startsWith('/zipper/')) return [];
 
     const response = await axios.get(codedewUrl, {
-        headers: getHeaders(refererUrl),
-        timeout: 12000,
+        headers: { ...getHeaders(refererUrl), Referer: refererUrl },
+        timeout: 15000,
         maxRedirects: 5
     });
 
     const html = String(response.data || '');
-    const $ = cheerio.load(html);
     const sources = [];
     const seen = new Set();
 
-    const add = (rawUrl, name, language) => {
+    const add = (rawUrl, name = 'Public Player', language = 'Default') => {
         if (!rawUrl || typeof rawUrl !== 'string') return;
         let url;
         try {
-            url = new URL(rawUrl.replace(/\\\//g, '/'), codedewUrl).href;
+            url = new URL(rawUrl.replace(/\\\//g, '/').replace(/\\u0026/g, '&'), codedewUrl).href;
         } catch { return; }
-
-        const p = new URL(url);
-        const host = p.hostname.toLowerCase();
-        const path = p.pathname.toLowerCase();
-        const allowed =
-            host.includes('pixeldra.in') ||
-            host.includes('fuckingfast.net') ||
-            host.includes('argon.razorshell.space') ||
-            host.includes('googleusercontent.com');
-        const directMedia =
-            /\.(m3u8|mp4|mkv|webm|ts)(\?|$)/i.test(path) ||
-            host.includes('flashzipper.workers.dev') ||
-            /(^|\.)r2\.cloudflarestorage\.com$/i.test(host);
-
-        if (!allowed || directMedia || seen.has(url)) return;
+        const host = new URL(url).hostname.toLowerCase();
+        if (host === 'codedew.com' || host === 'www.codedew.com' || host.includes('flashzipper.workers.dev')) return;
+        if (seen.has(url)) return;
         seen.add(url);
-        sources.push({
-            server: name || host,
-            language: language || 'Default',
-            link: url,
-            type: 'player',
-            public: true,
-            via: 'Codedew public playerSources.url'
-        });
+        sources.push({ server: name || host, language: language || 'Default', link: url, type: 'player', public: true, via: 'Codedew public playerSources.url' });
     };
 
-    const scripts = $('script').map((_, el) => $(el).html() || '').get();
-
-    for (const script of scripts) {
-        // Do not JSON.parse the whole array: Codedew source can contain very
-        // long escaped URLs and formatting/newlines that make array parsing
-        // brittle. Instead isolate playerSources and extract each public
-        // "url" property directly from the source.
-        const blockMatch = script.match(
-            /(?:let|const|var)\s+playerSources\s*=\s*\[/i
-        );
-
-        if (!blockMatch) continue;
-
-        const start = blockMatch.index;
-        const end = script.indexOf('];', start);
-        if (start < 0 || end < 0) continue;
-
-        const block = script.slice(start, end + 1);
-
-        const urlMatches = block.matchAll(
-            /"url"\s*:\s*"((?:\\\\.|[^"\\\\])*)"/g
-        );
-
-        for (const match of urlMatches) {
-            try {
-                const raw = JSON.parse('"' + match[1] + '"');
-                add(raw, undefined, 'Default');
-            } catch {}
+    // Codedew exposes playerSources in the raw page source. Parse that raw source.
+    const playerSourcesStart = html.search(/(?:let|const|var)\s+playerSources\s*=\s*\[/i);
+    if (playerSourcesStart !== -1) {
+        const arrayStart = html.indexOf('[', playerSourcesStart);
+        let depth = 0, inString = false, escaped = false, arrayEnd = -1;
+        for (let i = arrayStart; i < html.length; i++) {
+            const ch = html[i];
+            if (inString) {
+                if (escaped) escaped = false;
+                else if (ch === '\\') escaped = true;
+                else if (ch === '"') inString = false;
+                continue;
+            }
+            if (ch === '"') inString = true;
+            else if (ch === '[') depth++;
+            else if (ch === ']') { depth--; if (depth === 0) { arrayEnd = i + 1; break; } }
         }
-
-        // Capture the provider name belonging to each object when possible.
-        // Re-run object-by-object so V1/V2/V3/V4 labels remain useful.
-        const objectMatches = block.matchAll(
-            /\{([\\s\\S]*?)\}/g
-        );
-
-        for (const objectMatch of objectMatches) {
-            const objectText = objectMatch[1];
-            const urlMatch = objectText.match(
-                /"url"\s*:\s*"((?:\\\\.|[^"\\\\])*)"/
-            );
-            if (!urlMatch) continue;
-
-            try {
-                const raw = JSON.parse('"' + urlMatch[1] + '"');
-                const nameMatch = objectText.match(
-                    /"name"\s*:\s*"([^"]*)"/
-                );
-                add(raw, nameMatch?.[1], 'Default');
-            } catch {}
+        if (arrayEnd > arrayStart) {
+            const block = html.slice(arrayStart, arrayEnd);
+            for (const objectMatch of block.matchAll(/\{([\s\S]*?)\}/g)) {
+                const objectText = objectMatch[1];
+                const urlMatch = objectText.match(/["']url["']\s*:\s*["']((?:\\.|[^"'\\])*)["']/i);
+                if (!urlMatch) continue;
+                let rawUrl;
+                try { rawUrl = JSON.parse('"' + urlMatch[1] + '"'); }
+                catch { rawUrl = urlMatch[1].replace(/\\\//g, '/').replace(/\\u0026/g, '&'); }
+                const nameMatch = objectText.match(/["'](?:name|server|label)["']\s*:\s*["']([^"']+)["']/i);
+                const languageMatch = objectText.match(/["'](?:language|lang)["']\s*:\s*["']([^"']+)["']/i);
+                add(rawUrl, nameMatch?.[1] || 'Public Player', languageMatch?.[1] || 'Default');
+            }
         }
     }
 
+    const $ = cheerio.load(html);
+    $('iframe[src], iframe[data-src], iframe[data-lazy-src]').each((_, el) => {
+        add($(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy-src'), 'Iframe Player', 'Default');
+    });
     return sources;
 };
 
