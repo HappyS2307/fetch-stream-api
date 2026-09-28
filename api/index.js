@@ -779,17 +779,28 @@ const extractPublicArgonLinksFromHtml = (html, baseUrl = RAREANIMES_BASE) => {
         }
     });
 
-    // Inline JS / JSON fallback, scoped to Argon URLs on this exact episode
-    // document. This is deliberately NOT used on season pages.
-    const patterns = [
-        /https?:\\/\\/argon\\.razorshell\\.space\\/embed\\/[A-Za-z0-9_-]+/gi,
-        /\\/\\/argon\\.razorshell\\.space\\/embed\\/[A-Za-z0-9_-]+/gi,
-        /https:\\\\/\\\\/argon\\\\.razorshell\\\\.space\\\\/embed\\\\/[A-Za-z0-9_-]+/gi
+    // Inline JS / JSON fallback. Avoid regex literals here because the page
+    // itself may contain several escaped URL representations.
+    const markers = [
+        'https://argon.razorshell.space/embed/',
+        'http://argon.razorshell.space/embed/',
+        '//argon.razorshell.space/embed/'
     ];
 
-    for (const pattern of patterns) {
-        const matches = source.match(pattern) || [];
-        for (const match of matches) addCandidate(match);
+    for (const marker of markers) {
+        let offset = 0;
+        while (offset < source.length) {
+            const index = source.toLowerCase().indexOf(marker, offset);
+            if (index === -1) break;
+
+            let end = index + marker.length;
+            while (end < source.length && /[A-Za-z0-9_-]/.test(source[end])) {
+                end++;
+            }
+
+            addCandidate(source.slice(index, end));
+            offset = end;
+        }
     }
 
     return links;
