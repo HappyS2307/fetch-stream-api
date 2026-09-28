@@ -755,51 +755,77 @@ const extractRareAnimesRelatedData = (html) => {
 const extractPublicArgonLinksFromHtml = (html, baseUrl = RAREANIMES_BASE) => {
     const links = [];
     const seen = new Set();
+    const source = String(html || '')
+        .replace(/\\\//g, '/')
+        .replace(/\\u0026/g, '&')
+        .replace(/&amp;/gi, '&');
 
-    const add = (raw) => {
-        if (!raw || typeof raw !== 'string') return;
+    const addCandidate = (candidate) => {
+        if (!candidate) return;
 
-        const normalized = raw
-            .replace(/\\\//g, '/')
-            .replace(/\\u0026/g, '&')
-            .replace(/&amp;/gi, '&')
-            .trim();
+        const clean = String(candidate)
+            .trim()
+            .replace(/[)"'<>;,]+$/g, '');
 
-        const matches = normalized.match(
-            /https?:\\/\\/argon\\.razorshell\\.space\\/embed\\/[A-Za-z0-9_-]+/ig
-        ) || [];
+        try {
+            const url = new URL(clean, baseUrl).href;
+            const parsed = new URL(url);
 
-        for (const candidate of matches) {
-            try {
-                const url = new URL(candidate, baseUrl).href;
-                const parsed = new URL(url);
+            if (
+                parsed.hostname.toLowerCase() !== 'argon.razorshell.space' ||
+                !parsed.pathname.toLowerCase().startsWith('/embed/')
+            ) {
+                return;
+            }
 
-                if (
-                    parsed.hostname.toLowerCase() !== 'argon.razorshell.space' ||
-                    !parsed.pathname.toLowerCase().startsWith('/embed/')
-                ) {
-                    continue;
-                }
-
-                if (seen.has(url)) continue;
-                seen.add(url);
-                links.push(url);
-            } catch {}
-        }
+            if (seen.has(url)) return;
+            seen.add(url);
+            links.push(url);
+        } catch {}
     };
 
-    const source = String(html || '');
-    const $ = cheerio.load(source);
+    // Scan text without a regex literal for the Argon host. This avoids
+    // startup/parser issues caused by escaped slash regex literals.
+    const marker = 'https://argon.razorshell.space/embed/';
+    let offset = 0;
 
-    $('iframe, [src], [data-src], [data-lazy-src], [data-url], [data-href], [data-link], [onclick]').each((_, element) => {
-        const attrs = element.attribs || {};
+    while (offset < source.length) {
+        const index = source.indexOf(marker, offset);
+        if (index === -1) break;
 
-        for (const value of Object.values(attrs)) {
-            add(String(value || ''));
+        let end = index + marker.length;
+
+        while (
+            end < source.length &&
+            /[A-Za-z0-9_-]/.test(source[end])
+        ) {
+            end++;
         }
-    });
 
-    add(source);
+        addCandidate(source.slice(index, end));
+        offset = end;
+    }
+
+    // Also inspect protocol-relative Argon URLs if a page exposes one.
+    const protocolRelativeMarker = '//argon.razorshell.space/embed/';
+    offset = 0;
+
+    while (offset < source.length) {
+        const index = source.indexOf(protocolRelativeMarker, offset);
+        if (index === -1) break;
+
+        let end = index + protocolRelativeMarker.length;
+
+        while (
+            end < source.length &&
+            /[A-Za-z0-9_-]/.test(source[end])
+        ) {
+            end++;
+        }
+
+        addCandidate('https:' + source.slice(index, end));
+        offset = end;
+    }
 
     return links;
 };
