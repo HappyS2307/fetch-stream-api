@@ -969,104 +969,188 @@ const searchRareAnimes = async (query) => {
         return [];
     }
 
-    const searchUrl =
-        RAREANIMES_BASE +
-        "/?s=" +
-        encodeURIComponent(cleanQuery);
+    /*
+     * RareAnimes search can paginate the season articles. The old scraper
+     * only read the first result page, which caused Naruto Shippuden to
+     * start at Season 04/05/etc. when Season 01 was on another page.
+     *
+     * We intentionally crawl only the public search-result pages for the
+     * user's exact query. We do NOT crawl episode/player pages here.
+     */
+    const searchUrls = [];
+    const seenSearchUrls = new Set();
 
-    try {
-        const response = await axios.get(searchUrl, {
-            headers: getHeaders(RAREANIMES_BASE),
-            timeout: 15000,
-            maxRedirects: 5
-        });
+    const addSearchUrl = (url) => {
+        try {
+            const absolute = new URL(url, RAREANIMES_BASE).href;
+            if (seenSearchUrls.has(absolute)) return;
+            seenSearchUrls.add(absolute);
+            searchUrls.push(absolute);
+        } catch {}
+    };
 
-        const $ = cheerio.load(response.data);
-        const results = [];
-        const seen = new Set();
-        const queryLower = cleanQuery.toLowerCase();
+    const encoded = encodeURIComponent(cleanQuery);
 
-        $("a[href]").each((index, element) => {
-            const title = $(element)
-                .text()
-                .replace(/\s+/g, " ")
-                .trim();
+    addSearchUrl(
+        RAREANIMES_BASE + "/?s=" + encoded
+    );
 
-            const href = $(element).attr("href");
+    /*
+     * Cover the two common WordPress pagination forms. Duplicates are
+     * removed, and the per-query cap below prevents unbounded crawling.
+     */
+    for (let page = 2; page <= 8; page++) {
+        addSearchUrl(
+            RAREANIMES_BASE +
+            "/?s=" +
+            encoded +
+            "&paged=" +
+            page
+        );
 
-            if (!title || !href) {
-                return;
-            }
-
-            let link;
-
-            try {
-                link = new URL(href, RAREANIMES_BASE).href;
-            } catch {
-                return;
-            }
-
-            const parsed = new URL(link);
-
-            if (parsed.hostname !== "www.rareanimes.mov") {
-                return;
-            }
-
-            if (
-                parsed.pathname === "/" &&
-                !parsed.searchParams.has("s")
-            ) {
-                return;
-            }
-
-            const blockedPaths = [
-                "/category/",
-                "/tag/",
-                "/page/",
-                "/author/",
-                "/search/"
-            ];
-
-            if (
-                blockedPaths.some(path =>
-                    parsed.pathname.includes(path)
-                )
-            ) {
-                return;
-            }
-
-            if (
-                parsed.searchParams.has("s") ||
-                parsed.searchParams.has("url")
-            ) {
-                return;
-            }
-
-            if (!title.toLowerCase().includes(queryLower)) {
-                return;
-            }
-
-            link = fixUrl(link);
-
-            if (seen.has(link)) {
-                return;
-            }
-
-            seen.add(link);
-
-            results.push({
-                title,
-                link,
-                type: "series",
-                source: "RareAnimes"
-            });
-        });
-
-        return results.slice(0, 30);
-    } catch (err) {
-        console.error("[RareAnimes] Search failed:", err.message);
-        return [];
+        addSearchUrl(
+            RAREANIMES_BASE +
+            "/page/" +
+            page +
+            "/?s=" +
+            encoded
+        );
     }
+
+    const results = [];
+    const seen = new Set();
+
+    for (const searchUrl of searchUrls) {
+        try {
+            const response = await axios.get(searchUrl, {
+                headers: getHeaders(RAREANIMES_BASE),
+                timeout: 15000,
+                maxRedirects: 5
+            });
+
+            const $ = cheerio.load(response.data);
+            const queryLower = cleanQuery.toLowerCase();
+
+            $("a[href]").each((index, element) => {
+                const title = $(element)
+                    .text()
+                    .replace(/\s+/g, " ")
+                    .trim();
+
+                const href = $(element).attr("href");
+
+                if (!title || !href) return;
+
+                let link;
+
+                try {
+                    link = new URL(href, RAREANIMES_BASE).href;
+                } catch {
+                    return;
+                }
+
+                const parsed = new URL(link);
+
+                if (
+                    !["www.rareanimes.mov", "rareanimes.mov"].includes(
+                        parsed.hostname.toLowerCase()
+                    )
+                ) {
+                    return;
+                }
+
+                if (
+                    parsed.pathname === "/" &&
+                    !parsed.searchParams.has("s")
+                ) {
+                    return;
+                }
+
+                const blockedPaths = [
+                    "/category/",
+                    "/tag/",
+                    "/page/",
+                    "/author/",
+                    "/search/"
+                ];
+
+                if (
+                    blockedPaths.some(path =>
+                        parsed.pathname.includes(path)
+                    )
+                ) {
+                    return;
+                }
+
+                if (
+                    parsed.searchParams.has("s") ||
+                    parsed.searchParams.has("url")
+                ) {
+                    return;
+                }
+
+                if (!title.toLowerCase().includes(queryLower)) {
+                    return;
+                }
+
+                link = fixUrl(link);
+
+                if (seen.has(link)) return;
+
+                seen.add(link);
+
+                results.push({
+                    title,
+                    link,
+                    type: "series",
+                    source: "RareAnimes"
+                });
+            });
+
+            /*
+             * Eight pages is deliberately bounded. Once we have collected
+             * enough season/article results, there is no reason to keep
+             * hitting the public search endpoint.
+             */
+            if (results.length >= 100) {
+                break;
+            }
+        } catch (err) {
+            console.error(
+                "[RareAnimes] Search page failed:",
+                searchUrl,
+                err.message
+            );
+        }
+    }
+
+    /*
+     * Stable ordering: season articles are ordered numerically before
+     * non-season matches. This guarantees Season 01 is not pushed behind
+     * later seasons merely because of website result ordering.
+     */
+    results.sort((a, b) => {
+        const getSeason = (title) => {
+            const match = String(title || "").match(
+                /\bseason\s*[- ]?(\d+)\b/i
+            );
+
+            return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+        };
+
+        const sa = getSeason(a.title);
+        const sb = getSeason(b.title);
+
+        if (sa !== sb) return sa - sb;
+
+        return String(a.title).localeCompare(
+            String(b.title),
+            undefined,
+            { numeric: true, sensitivity: "base" }
+        );
+    });
+
+    return results.slice(0, 100);
 };
 
 const getRareAnimesEpisodes = (html) => {
