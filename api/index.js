@@ -1096,7 +1096,7 @@ const extractRareAnimesCodedewLinksFromPage = ($, baseUrl = RAREANIMES_BASE, htm
     return links;
 };
 
-const extractRareAnimesEpisodeScopedCodedewLinks = ($, episodeNumber, episodeTitle) => {
+const extractRareAnimesEpisodeScopedCodedewLinks = ($, episodeNumber, episodeTitle, html = '', baseUrl = RAREANIMES_BASE) => {
     if (!episodeNumber && !episodeTitle) return [];
 
     const grouped = extractRareAnimesEpisodePlayers($);
@@ -1123,13 +1123,20 @@ const extractRareAnimesEpisodeScopedCodedewLinks = ($, episodeNumber, episodeTit
         return false;
     });
 
-    return (match?.streams || [])
-        .filter(item => item && item.link)
-        .map(item => ({
-            ...item,
-            type: 'source',
-            public: true
-        }));
+    if (match?.streams?.length) {
+        return match.streams
+            .filter(item => item && item.link)
+            .map(item => ({
+                ...item,
+                type: 'source',
+                public: true
+            }));
+    }
+
+    // Some exact episode pages do not place the Episode heading next to the
+    // WatchQuality paragraph. Fall back to scanning ONLY this exact episode
+    // document; never use this fallback on a season/search page.
+    return extractRareAnimesCodedewLinksFromPage($, baseUrl, html);
 };
 
 const loadRareAnimesEpisodeById = async (episodeId) => {
@@ -1195,7 +1202,9 @@ const loadRareAnimesEpisodeById = async (episodeId) => {
             extractRareAnimesEpisodeScopedCodedewLinks(
                 $,
                 episodeNumber,
-                matchedMeta?.ep_name || episodeTitle
+                matchedMeta?.ep_name || episodeTitle,
+                html,
+                page.url || episodeUrl
             );
 
         const codedewLinks = scopedCodedewLinks.map(item => ({
