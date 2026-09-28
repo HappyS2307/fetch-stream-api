@@ -2548,6 +2548,41 @@ app.get('/rareanimes/player-groups', async (req, res) => {
 });
 
 
+const fetchPublicCodedewArgonLinks = async (codedewUrl, refererUrl = RAREANIMES_BASE) => {
+    if (!codedewUrl) return [];
+
+    try {
+        const parsed = new URL(codedewUrl);
+
+        if (
+            parsed.hostname.toLowerCase() !== "codedew.com" ||
+            !parsed.pathname.toLowerCase().startsWith("/zipper/")
+        ) {
+            return [];
+        }
+
+        const response = await axios.get(codedewUrl, {
+            headers: {
+                ...getHeaders(refererUrl),
+                Referer: refererUrl
+            },
+            timeout: 10000,
+            maxRedirects: 5
+        });
+
+        const html = String(response.data || "");
+        const $ = cheerio.load(html);
+        return extractRareAnimesArgonLinks($, html, codedewUrl);
+    } catch (err) {
+        console.error(
+            "[RareAnimes] Codedew public Argon lookup failed:",
+            codedewUrl,
+            err.message
+        );
+        return [];
+    }
+};
+
 app.get('/rareanimes/streams', async (req, res) => {
     const rawUrl = String(req.query.url || "").trim();
     const requestedEpisode = String(req.query.episode || "").trim();
@@ -2663,11 +2698,15 @@ app.get('/rareanimes/streams', async (req, res) => {
 
         for (const codedewUrl of codedew) {
             try {
-                const source = await fetchPublicCodedewArgon(
-                    codedewUrl,
-                    episodeUrl
-                );
-                if (source?.link) addArgon(source.link);
+                const argonLinks =
+                    await fetchPublicCodedewArgonLinks(
+                        codedewUrl,
+                        episodeUrl
+                    );
+
+                for (const link of argonLinks) {
+                    addArgon(link);
+                }
             } catch (err) {
                 console.log(
                     "[RareAnimes] Codedew -> Argon failed:",
