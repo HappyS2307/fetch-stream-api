@@ -842,16 +842,6 @@ const fetchPublicCodedewArgon = async (codedewUrl, refererUrl = RAREANIMES_BASE)
         });
         const html = String(response.data || '');
         const links = extractPublicArgonLinksFromHtml(html, codedewUrl);
-        if (!links.length) {
-            const decoded = html.replace(/\\\//g, '/').replace(/\\u0026/g, '&')
-                .replace(/\\u003a/gi, ':').replace(/\\u002f/gi, '/').replace(/&amp;/gi, '&');
-            const matches = decoded.match(/(?:https?:)?\\/\\/argon\\.razorshell\\.space\\/embed\\/[A-Za-z0-9_-]+/gi) || [];
-            for (const match of matches) {
-                const candidateHtml = '<iframe src="' + match + '"></iframe>';
-                const candidate = extractPublicArgonLinksFromHtml(candidateHtml, codedewUrl);
-                if (candidate.length) return { server:'Argon', language:'Default', link:candidate[0], type:'embed', public:true, via:'Codedew public HTML' };
-            }
-        }
         if (!links.length) return null;
         return { server:'Argon', language:'Default', link:links[0], type:'embed', public:true, via:'Codedew public HTML' };
     } catch (err) {
