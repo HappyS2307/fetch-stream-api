@@ -2945,7 +2945,9 @@ app.get('/rareanimes/codedew-public-sources', async (req, res) => {
 
 
 app.get('/rareanimes/streams', async (req, res) => {
-    const rawUrl = req.query.url;
+    const rawUrl = String(req.query.url || '').trim();
+    const requestedEpisode = String(req.query.episode || '').trim();
+    const requestedTitle = String(req.query.title || '').trim();
 
     if (!rawUrl) {
         return res.status(400).json({ error: 'URL is required' });
@@ -2954,35 +2956,77 @@ app.get('/rareanimes/streams', async (req, res) => {
     try {
         const parsed = new URL(rawUrl, RAREANIMES_BASE);
 
-        // The streams endpoint accepts only the immutable RareAnimes episode
-        // identity. Reject generic pages so a season/search URL can never be
-        // interpreted as the selected episode.
-        if (
-            !['www.rareanimes.mov', 'rareanimes.mov'].includes(
-                parsed.hostname.toLowerCase()
-            ) ||
-            !parsed.searchParams.has('url') ||
-            !parsed.searchParams.get('url')
-        ) {
-            return res.status(400).json({
-                error: 'Exact RareAnimes episode URL is required'
-            });
+        if (!['www.rareanimes.mov', 'rareanimes.mov'].includes(parsed.hostname.toLowerCase())) {
+            return res.status(400).json({ error: 'RareAnimes URL required' });
         }
 
-        const episodeId = String(
-            parsed.searchParams.get('url')
-        ).trim();
+        let episodeId = parsed.searchParams.get('url');
 
-        const resolved = await loadRareAnimesEpisodeById(episodeId);
+        // If the bot still has a season-page URL, recover the exact immutable
+        // episode ID from that SAME page using the selected episode number/title.
+        if (!episodeId) {
+            const page = await fetchRareAnimesPage(rawUrl);
+            const html = String(page.data || '');
+            const relatedData = extractRareAnimesRelatedData(html);
+
+            const candidates = [];
+            for (const value of Object.values(relatedData)) {
+                if (!value || !Array.isArray(value.episodes)) continue;
+                for (const item of value.episodes) {
+                    if (item?.id) candidates.push(item);
+                }
+            }
+
+            const byNumber = requestedEpisode
+                ? candidates.find(item => Number(item.e) === Number(requestedEpisode))
+                : null;
+
+            const normalizedTitle = requestedTitle
+                .replace(/\s+/g, ' ')
+                .trim()
+                .toLowerCase();
+
+            const byTitle = normalizedTitle
+                ? candidates.find(item =>
+                    String(item.ep_name || '')
+                        .replace(/\s+/g, ' ')
+                        .trim()
+                        .toLowerCase() === normalizedTitle
+                )
+                : null;
+
+            const selected = byNumber || byTitle;
+
+            if (!selected?.id) {
+                return res.json({
+                    source: 'RareAnimes',
+                    title: requestedTitle || null,
+                    streams: [],
+                    total_streams: 0,
+                    public_player_sources_found: false,
+                    error: 'Exact RareAnimes episode ID could not be mapped',
+                    debug: {
+                        requested_episode: requestedEpisode || null,
+                        requested_title: requestedTitle || null,
+                        candidate_count: candidates.length
+                    }
+                });
+            }
+
+            episodeId = String(selected.id);
+        }
+
+        const resolved = await loadRareAnimesEpisodeById(String(episodeId));
 
         if (!resolved) {
             return res.json({
                 source: 'RareAnimes',
-                title: null,
+                title: requestedTitle || null,
+                episode_id: String(episodeId),
                 streams: [],
                 total_streams: 0,
                 public_player_sources_found: false,
-                message: 'Exact RareAnimes episode could not be resolved.'
+                error: 'Exact RareAnimes episode page could not be loaded'
             });
         }
 
@@ -2992,11 +3036,9 @@ app.get('/rareanimes/streams', async (req, res) => {
         const addStreams = (items) => {
             for (const item of items || []) {
                 const link = String(item?.link || '').trim();
-
                 if (!link || seen.has(link)) continue;
 
                 seen.add(link);
-
                 streams.push({
                     ...item,
                     server: 'Argon',
@@ -3006,37 +3048,22 @@ app.get('/rareanimes/streams', async (req, res) => {
             }
         };
 
-        // Only sources discovered from the exact episode page and the exact
-        // episode's scoped WatchQuality/Codedew groups are accepted.
         addStreams(resolved.streams);
 
-        const codedewCandidates = [];
-        const codedewSeen = new Set();
-
         for (const item of resolved.codedewLinks || []) {
-            const link = String(item?.link || '').trim();
+            const codedewUrl = String(item?.link || '').trim();
+            if (!codedewUrl) continue;
 
-            if (!link || codedewSeen.has(link)) continue;
-
-            codedewSeen.add(link);
-            codedewCandidates.push(link);
-        }
-
-        // Resolve every unique public Codedew source belonging to this exact
-        // episode. No season-page-wide Codedew scan occurs here.
-        for (const codedewUrl of codedewCandidates) {
             try {
                 const source = await fetchPublicCodedewArgon(
                     codedewUrl,
-                    resolved.link || rawUrl
+                    resolved.link
                 );
 
-                if (source?.link) {
-                    addStreams([source]);
-                }
+                if (source?.link) addStreams([source]);
             } catch (err) {
                 console.log(
-                    '[RareAnimes] Exact-episode Codedew lookup failed:',
+                    '[RareAnimes] Codedew -> Argon failed:',
                     codedewUrl,
                     err.message
                 );
@@ -3045,17 +3072,18 @@ app.get('/rareanimes/streams', async (req, res) => {
 
         return res.json({
             source: 'RareAnimes',
-            title: resolved.title || null,
+            title: resolved.title || requestedTitle || null,
             episode_id: resolved.episodeId,
-            episode_number: resolved.episodeNumber || null,
+            episode_number: resolved.episodeNumber || Number(requestedEpisode) || null,
             episode_url: resolved.link,
             streams,
             total_streams: streams.length,
             public_player_sources_found: streams.length > 0,
             player: 'Argon',
-            extraction: 'exact episode page + exact episode-scoped public Codedew/WatchQuality sources'
+            extraction: 'exact episode ID -> exact episode page -> direct Argon + exact-page Codedew'
         });
     } catch (err) {
+        console.error('[RareAnimes] streams resolver failed:', err.message);
         handleScraperError(
             res,
             err,
@@ -3063,7 +3091,6 @@ app.get('/rareanimes/streams', async (req, res) => {
         );
     }
 });
-
 
 // Dedicated resolver for an actual public RareAnimes episode page.
 app.get('/rareanimes/argon', async (req, res) => {
