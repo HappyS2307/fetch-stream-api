@@ -2691,10 +2691,19 @@ app.get('/rareanimes/player-groups', async (req, res) => {
 // Only those already-public URL fields are returned; encoded stream_url payloads are ignored.
 const extractCodedewPublicPlayerSources = async (codedewUrl, refererUrl = RAREANIMES_BASE) => {
     const parsed = new URL(codedewUrl);
-    if (parsed.hostname.toLowerCase() !== 'codedew.com' || !parsed.pathname.toLowerCase().startsWith('/zipper/')) return [];
+
+    if (
+        parsed.hostname.toLowerCase() !== 'codedew.com' ||
+        !parsed.pathname.toLowerCase().startsWith('/zipper/')
+    ) {
+        return [];
+    }
 
     const response = await axios.get(codedewUrl, {
-        headers: { ...getHeaders(refererUrl), Referer: refererUrl },
+        headers: {
+            ...getHeaders(refererUrl),
+            Referer: refererUrl
+        },
         timeout: 15000,
         maxRedirects: 5
     });
@@ -2703,56 +2712,70 @@ const extractCodedewPublicPlayerSources = async (codedewUrl, refererUrl = RAREAN
     const sources = [];
     const seen = new Set();
 
-    const add = (rawUrl, name = 'Public Player', language = 'Default') => {
+    const addArgon = (rawUrl) => {
         if (!rawUrl || typeof rawUrl !== 'string') return;
+
         let url;
         try {
-            url = new URL(rawUrl.replace(/\\\//g, '/').replace(/\\u0026/g, '&'), codedewUrl).href;
-        } catch { return; }
-        const host = new URL(url).hostname.toLowerCase();
-        if (host === 'codedew.com' || host === 'www.codedew.com' || host.includes('flashzipper.workers.dev')) return;
+            url = new URL(
+                rawUrl
+                    .replace(/\\\//g, '/')
+                    .replace(/\\u0026/g, '&'),
+                codedewUrl
+            ).href;
+        } catch {
+            return;
+        }
+
+        try {
+            const u = new URL(url);
+            if (
+                u.hostname.toLowerCase() !== 'argon.razorshell.space' ||
+                !u.pathname.toLowerCase().startsWith('/embed/')
+            ) {
+                return;
+            }
+        } catch {
+            return;
+        }
+
         if (seen.has(url)) return;
         seen.add(url);
-        sources.push({ server: name || host, language: language || 'Default', link: url, type: 'player', public: true, via: 'Codedew public playerSources.url' });
+
+        sources.push({
+            server: 'Argon',
+            language: 'Default',
+            link: url,
+            type: 'embed',
+            public: true,
+            via: 'WatchQuality/Codedew public HTML'
+        });
     };
 
-    // Codedew exposes playerSources in the raw page source. Parse that raw source.
-    const playerSourcesStart = html.search(/(?:let|const|var)\s+playerSources\s*=\s*\[/i);
-    if (playerSourcesStart !== -1) {
-        const arrayStart = html.indexOf('[', playerSourcesStart);
-        let depth = 0, inString = false, escaped = false, arrayEnd = -1;
-        for (let i = arrayStart; i < html.length; i++) {
-            const ch = html[i];
-            if (inString) {
-                if (escaped) escaped = false;
-                else if (ch === '\\') escaped = true;
-                else if (ch === '"') inString = false;
-                continue;
-            }
-            if (ch === '"') inString = true;
-            else if (ch === '[') depth++;
-            else if (ch === ']') { depth--; if (depth === 0) { arrayEnd = i + 1; break; } }
-        }
-        if (arrayEnd > arrayStart) {
-            const block = html.slice(arrayStart, arrayEnd);
-            for (const objectMatch of block.matchAll(/\{([\s\S]*?)\}/g)) {
-                const objectText = objectMatch[1];
-                const urlMatch = objectText.match(/["']url["']\s*:\s*["']((?:\\.|[^"'\\])*)["']/i);
-                if (!urlMatch) continue;
-                let rawUrl;
-                try { rawUrl = JSON.parse('"' + urlMatch[1] + '"'); }
-                catch { rawUrl = urlMatch[1].replace(/\\\//g, '/').replace(/\\u0026/g, '&'); }
-                const nameMatch = objectText.match(/["'](?:name|server|label)["']\s*:\s*["']([^"']+)["']/i);
-                const languageMatch = objectText.match(/["'](?:language|lang)["']\s*:\s*["']([^"']+)["']/i);
-                add(rawUrl, nameMatch?.[1] || 'Public Player', languageMatch?.[1] || 'Default');
-            }
-        }
+    // PRIMARY: WatchQuality/Codedew exposes the public Argon iframe directly.
+    const $ = cheerio.load(html);
+
+    $('iframe[src], iframe[data-src], iframe[data-lazy-src]').each((_, el) => {
+        addArgon(
+            $(el).attr('src') ||
+            $(el).attr('data-src') ||
+            $(el).attr('data-lazy-src')
+        );
+    });
+
+    // SECONDARY: some pages expose the Argon URL in inline HTML/JS instead
+    // of putting it directly in the iframe attribute.
+    const normalizedHtml = html
+        .replace(/\\\//g, '/')
+        .replace(/\\u0026/g, '&');
+
+    const argonPattern =
+        /https?:\\/\\/argon\\.razorshell\\.space\\/embed\\/[A-Za-z0-9_-]+/g;
+
+    for (const match of normalizedHtml.matchAll(argonPattern)) {
+        addArgon(match[0]);
     }
 
-    const $ = cheerio.load(html);
-    $('iframe[src], iframe[data-src], iframe[data-lazy-src]').each((_, el) => {
-        add($(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy-src'), 'Iframe Player', 'Default');
-    });
     return sources;
 };
 
