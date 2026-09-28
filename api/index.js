@@ -2650,6 +2650,130 @@ app.get('/rareanimes/player-groups', async (req, res) => {
 });
 
 
+/* =========================================
+   RAREANIMES PUBLIC PLAYER METADATA
+   ========================================= */
+
+// Extract only publicly exposed player/embed metadata from the episode HTML.
+// Direct media files, encoded wrappers and protected/expiring URLs are intentionally
+// not returned by this endpoint.
+const extractRareAnimesPublicPlayerMetadata = (html, pageUrl) => {
+    const $ = cheerio.load(html);
+    const results = [];
+    const seen = new Set();
+
+    const add = (rawUrl, meta = {}) => {
+        if (!rawUrl) return;
+
+        let url;
+        try {
+            url = new URL(String(rawUrl).replace(/\\\//g, '/'), pageUrl).href;
+        } catch {
+            return;
+        }
+
+        const parsed = new URL(url);
+        const host = parsed.hostname.toLowerCase();
+        const path = parsed.pathname.toLowerCase();
+
+        // Keep public player/embed/provider pages only.
+        // Do not expose direct media or encoded/protected stream payloads.
+        const isDirectMedia =
+            /\\.(m3u8|mp4|mkv|webm|ts)(\\?|$)/i.test(path) ||
+            host.includes('flashzipper.workers.dev') ||
+            /(^|\\.)r2\\.cloudflarestorage\\.com$/i.test(host);
+
+        const isPlayerPage =
+            host.includes('argon.razorshell.space') ||
+            host.includes('pixeldra.in') ||
+            host.includes('fuckingfast.net') ||
+            host.includes('codedew.com') ||
+            /(^|\\.)googleusercontent\\.com$/i.test(host);
+
+        if (isDirectMedia || !isPlayerPage || seen.has(url)) return;
+
+        seen.add(url);
+
+        results.push({
+            url,
+            type: meta.type || 'player',
+            server: meta.server || host,
+            language: meta.language || 'Default',
+            public: true
+        });
+    };
+
+    // Public iframe/embed sources.
+    $('iframe[src], iframe[data-src], iframe[data-lazy-src]').each((_, el) => {
+        add(
+            $(el).attr('src') ||
+            $(el).attr('data-src') ||
+            $(el).attr('data-lazy-src'),
+            { type: 'embed' }
+        );
+    });
+
+    // Public playerSources JSON when it is embedded in page source.
+    const scriptText = $('script').map((_, el) => $(el).html() || '').get().join('\\n');
+    const matches = scriptText.match(/(?:playerSources|player_sources)\\s*=\\s*(\\[[\\s\\S]*?\\])\\s*;/g) || [];
+
+    for (const match of matches) {
+        const start = match.indexOf('[');
+        const end = match.lastIndexOf(']');
+        if (start < 0 || end <= start) continue;
+
+        try {
+            const parsed = JSON.parse(match.slice(start, end + 1));
+
+            if (!Array.isArray(parsed)) continue;
+
+            for (const item of parsed) {
+                if (!item || typeof item !== 'object') continue;
+
+                // Only use URL fields as provider/embed metadata; direct media
+                // fields are filtered by add().
+                add(item.url, {
+                    type: 'player-source',
+                    server: item.server || item.name || item.label || undefined,
+                    language: item.language || item.lang || 'Default'
+                });
+            }
+        } catch {
+            // Ignore malformed/dynamically generated playerSources blocks.
+        }
+    }
+
+    return results;
+};
+
+app.get('/rareanimes/public-player-sources', async (req, res) => {
+    const rawUrl = req.query.url;
+
+    if (!rawUrl) {
+        return res.status(400).json({ error: "URL is required" });
+    }
+
+    try {
+        const page = await fetchRareAnimesPage(rawUrl);
+        const html = String(page.data || '');
+        const sources = extractRareAnimesPublicPlayerMetadata(html, page.url || rawUrl);
+
+        res.json({
+            source: 'RareAnimes',
+            episode_url: rawUrl,
+            final_url: page.url || rawUrl,
+            sources,
+            total_sources: sources.length
+        });
+    } catch (err) {
+        handleScraperError(
+            res,
+            err,
+            'Failed to inspect public RareAnimes player metadata'
+        );
+    }
+});
+
 app.get('/rareanimes/streams', async (req, res) => {
     const rawUrl = req.query.url;
 
