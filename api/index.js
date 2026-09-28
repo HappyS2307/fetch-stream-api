@@ -984,55 +984,97 @@ const extractRareAnimesCodedewLinksFromPage = ($, baseUrl = RAREANIMES_BASE, htm
     const links = [];
     const seen = new Set();
 
-    const add = (raw) => {
-        if (!raw || typeof raw !== 'string') return;
+    const addCandidate = (candidate) => {
+        if (!candidate) return;
 
-        const normalized = raw
-            .replace(/\\\//g, '/')
-            .replace(/\\u0026/g, '&')
-            .replace(/&amp;/gi, '&');
+        let clean = String(candidate)
+            .trim()
+            .replace(/[),.;]+$/g, '');
 
-        const matches = normalized.match(
-            /https?:\\/\\/codedew\\.com\\/zipper\\/[^\\s"'<>]+/ig
-        ) || [];
+        try {
+            const absolute = new URL(clean, baseUrl).href;
+            const parsed = new URL(absolute);
 
-        for (let candidate of matches) {
-            candidate = candidate.replace(/[),.;]+$/g, '');
+            if (
+                parsed.hostname.toLowerCase() !== 'codedew.com' ||
+                !parsed.pathname.toLowerCase().startsWith('/zipper/')
+            ) {
+                return;
+            }
 
-            try {
-                const absolute = new URL(candidate, baseUrl).href;
-                const parsed = new URL(absolute);
+            if (seen.has(absolute)) return;
+            seen.add(absolute);
 
-                if (
-                    parsed.hostname.toLowerCase() !== 'codedew.com' ||
-                    !parsed.pathname.toLowerCase().startsWith('/zipper/')
-                ) {
-                    continue;
-                }
-
-                if (seen.has(absolute)) continue;
-                seen.add(absolute);
-
-                links.push({
-                    server: 'Codedew',
-                    language: 'Default',
-                    link: absolute,
-                    type: 'source',
-                    public: true
-                });
-            } catch {}
-        }
+            links.push({
+                server: 'Codedew',
+                language: 'Default',
+                link: absolute,
+                type: 'source',
+                public: true
+            });
+        } catch {}
     };
+
+    const source = String(html || '')
+        .replace(/\\\//g, '/')
+        .replace(/\\u0026/g, '&')
+        .replace(/&amp;/gi, '&');
+
+    const marker = 'https://codedew.com/zipper/';
+    let offset = 0;
+
+    while (offset < source.length) {
+        const index = source.indexOf(marker, offset);
+        if (index === -1) break;
+
+        let end = index + marker.length;
+
+        while (
+            end < source.length &&
+            source[end] !== '"' &&
+            source[end] !== "'" &&
+            source[end] !== '<' &&
+            source[end] !== '>' &&
+            source[end] !== '\\n' &&
+            source[end] !== '\\r' &&
+            source[end] !== ' ' &&
+            source[end] !== '\\t'
+        ) {
+            end++;
+        }
+
+        addCandidate(source.slice(index, end));
+        offset = end;
+    }
 
     $('a[href], [data-url], [data-href], [data-link], [data-src], [onclick]').each((_, element) => {
         const attrs = element.attribs || {};
 
         for (const value of Object.values(attrs)) {
-            add(String(value || ''));
+            const textValue = String(value || '');
+            const markerIndex = textValue.indexOf(marker);
+
+            if (markerIndex === -1) continue;
+
+            let end = markerIndex + marker.length;
+
+            while (
+                end < textValue.length &&
+                textValue[end] !== '"' &&
+                textValue[end] !== "'" &&
+                textValue[end] !== '<' &&
+                textValue[end] !== '>' &&
+                textValue[end] !== ' ' &&
+                textValue[end] !== '\\t' &&
+                textValue[end] !== '\\n' &&
+                textValue[end] !== '\\r'
+            ) {
+                end++;
+            }
+
+            addCandidate(textValue.slice(markerIndex, end));
         }
     });
-
-    add(String(html || ''));
 
     return links;
 };
