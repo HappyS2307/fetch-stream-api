@@ -2651,225 +2651,143 @@ app.get('/rareanimes/player-groups', async (req, res) => {
 
 
 /* =========================================
-   RAREANIMES PUBLIC PLAYER METADATA
+   RAREANIMES CODEDEW PUBLIC PLAYER SOURCES
    ========================================= */
 
-// Extract only publicly exposed player/embed metadata from the episode HTML.
-// Direct media files, encoded wrappers and protected/expiring URLs are intentionally
-// not returned by this endpoint.
-const extractRareAnimesPublicPlayerMetadata = (html, pageUrl) => {
+// Codedew exposes provider/player URLs in public source as playerSources[].url.
+// Only those already-public URL fields are returned; encoded stream_url payloads are ignored.
+const extractCodedewPublicPlayerSources = async (codedewUrl, refererUrl = RAREANIMES_BASE) => {
+    const parsed = new URL(codedewUrl);
+    if (parsed.hostname.toLowerCase() !== 'codedew.com' || !parsed.pathname.toLowerCase().startsWith('/zipper/')) return [];
+
+    const response = await axios.get(codedewUrl, {
+        headers: getHeaders(refererUrl),
+        timeout: 12000,
+        maxRedirects: 5
+    });
+
+    const html = String(response.data || '');
     const $ = cheerio.load(html);
-    const results = [];
+    const sources = [];
     const seen = new Set();
 
-    const add = (rawUrl, meta = {}) => {
-        if (!rawUrl) return;
-
+    const add = (rawUrl, name, language) => {
+        if (!rawUrl || typeof rawUrl !== 'string') return;
         let url;
         try {
-            url = new URL(String(rawUrl).replace(/\\\//g, '/'), pageUrl).href;
-        } catch {
-            return;
-        }
+            url = new URL(rawUrl.replace(/\\\//g, '/'), codedewUrl).href;
+        } catch { return; }
 
-        const parsed = new URL(url);
-        const host = parsed.hostname.toLowerCase();
-        const path = parsed.pathname.toLowerCase();
-
-        // Keep public player/embed/provider pages only.
-        // Do not expose direct media or encoded/protected stream payloads.
-        const isDirectMedia =
-            /\\.(m3u8|mp4|mkv|webm|ts)(\\?|$)/i.test(path) ||
-            host.includes('flashzipper.workers.dev') ||
-            /(^|\\.)r2\\.cloudflarestorage\\.com$/i.test(host);
-
-        const isPlayerPage =
-            host.includes('argon.razorshell.space') ||
+        const p = new URL(url);
+        const host = p.hostname.toLowerCase();
+        const path = p.pathname.toLowerCase();
+        const allowed =
             host.includes('pixeldra.in') ||
             host.includes('fuckingfast.net') ||
-            host.includes('codedew.com') ||
-            /(^|\\.)googleusercontent\\.com$/i.test(host);
+            host.includes('argon.razorshell.space') ||
+            host.includes('googleusercontent.com');
+        const directMedia =
+            /\.(m3u8|mp4|mkv|webm|ts)(\?|$)/i.test(path) ||
+            host.includes('flashzipper.workers.dev') ||
+            /(^|\.)r2\.cloudflarestorage\.com$/i.test(host);
 
-        if (isDirectMedia || !isPlayerPage || seen.has(url)) return;
-
+        if (!allowed || directMedia || seen.has(url)) return;
         seen.add(url);
-
-        results.push({
-            url,
-            type: meta.type || 'player',
-            server: meta.server || host,
-            language: meta.language || 'Default',
-            public: true
+        sources.push({
+            server: name || host,
+            language: language || 'Default',
+            link: url,
+            type: 'player',
+            public: true,
+            via: 'Codedew public playerSources.url'
         });
     };
 
-    // Public iframe/embed sources.
-    $('iframe[src], iframe[data-src], iframe[data-lazy-src]').each((_, el) => {
-        add(
-            $(el).attr('src') ||
-            $(el).attr('data-src') ||
-            $(el).attr('data-lazy-src'),
-            { type: 'embed' }
-        );
-    });
-
-    // Public playerSources JSON when it is embedded in page source.
-    const scriptText = $('script').map((_, el) => $(el).html() || '').get().join('\\n');
-    const matches = scriptText.match(/(?:playerSources|player_sources)\\s*=\\s*(\\[[\\s\\S]*?\\])\\s*;/g) || [];
-
-    for (const match of matches) {
-        const start = match.indexOf('[');
-        const end = match.lastIndexOf(']');
-        if (start < 0 || end <= start) continue;
-
+    const scripts = $('script').map((_, el) => $(el).html() || '').get();
+    for (const script of scripts) {
+        const match = script.match(/(?:let|const|var)\s+playerSources\s*=\s*(\[[\s\S]*?\])\s*;/);
+        if (!match) continue;
         try {
-            const parsed = JSON.parse(match.slice(start, end + 1));
-
-            if (!Array.isArray(parsed)) continue;
-
-            for (const item of parsed) {
+            const playerSources = JSON.parse(match[1]);
+            if (!Array.isArray(playerSources)) continue;
+            for (const item of playerSources) {
                 if (!item || typeof item !== 'object') continue;
-
-                // Only use URL fields as provider/embed metadata; direct media
-                // fields are filtered by add().
-                add(item.url, {
-                    type: 'player-source',
-                    server: item.server || item.name || item.label || undefined,
-                    language: item.language || item.lang || 'Default'
-                });
+                add(item.url, item.name || item.server || item.label, item.language || item.lang);
             }
-        } catch {
-            // Ignore malformed/dynamically generated playerSources blocks.
+        } catch (err) {
+            console.log('[RareAnimes] Failed to parse Codedew playerSources:', err.message);
         }
     }
-
-    return results;
+    return sources;
 };
 
-app.get('/rareanimes/public-player-sources', async (req, res) => {
+app.get('/rareanimes/codedew-public-sources', async (req, res) => {
     const rawUrl = req.query.url;
-
-    if (!rawUrl) {
-        return res.status(400).json({ error: "URL is required" });
-    }
-
+    if (!rawUrl) return res.status(400).json({ error: 'URL is required' });
     try {
-        const page = await fetchRareAnimesPage(rawUrl);
-        const html = String(page.data || '');
-        const sources = extractRareAnimesPublicPlayerMetadata(html, page.url || rawUrl);
-
-        res.json({
-            source: 'RareAnimes',
-            episode_url: rawUrl,
-            final_url: page.url || rawUrl,
-            sources,
-            total_sources: sources.length
-        });
+        const sources = await extractCodedewPublicPlayerSources(rawUrl, req.headers.referer || RAREANIMES_BASE);
+        res.json({ source: 'RareAnimes', codedew_url: rawUrl, sources, total_sources: sources.length });
     } catch (err) {
-        handleScraperError(
-            res,
-            err,
-            'Failed to inspect public RareAnimes player metadata'
-        );
+        handleScraperError(res, err, 'Failed to extract public player URLs from Codedew source');
     }
 });
 
+
 app.get('/rareanimes/streams', async (req, res) => {
     const rawUrl = req.query.url;
-
-    if (!rawUrl) {
-        return res.status(400).json({
-            error: "URL is required"
-        });
-    }
-
+    if (!rawUrl) return res.status(400).json({ error: 'URL is required' });
     try {
         const page = await fetchRareAnimesPage(rawUrl);
         const html = String(page.data || '');
         const $ = cheerio.load(html);
+        const title = $('h1').first().text().replace(/\s+/g, ' ').trim() || null;
+        const codedewLinks = [];
+        const seenCodedew = new Set();
 
-        const title =
-            $('h1').first().text().replace(/\\s+/g, ' ').trim() ||
-            null;
-
-        let argon = extractRareAnimesArgonEmbed($, html);
+        $('a[href]').each((_, element) => {
+            const href = String($(element).attr('href') || '').trim();
+            const label = $(element).text().replace(/\s+/g, ' ').trim();
+            if (!href || !/watchmultiquality|hubcloud|watchnow|dlbeta/i.test(label)) return;
+            try {
+                const absolute = new URL(href, page.url || RAREANIMES_BASE).href;
+                const parsed = new URL(absolute);
+                if (parsed.hostname.toLowerCase() !== 'codedew.com' || !parsed.pathname.toLowerCase().startsWith('/zipper/')) return;
+                if (seenCodedew.has(absolute)) return;
+                seenCodedew.add(absolute);
+                codedewLinks.push(absolute);
+            } catch {}
+        });
 
         const streams = [];
         const seen = new Set();
-
-        $('a[href]').each((index, element) => {
-            let href = $(element).attr('href');
-            const label = $(element).text().replace(/\\s+/g, ' ').trim();
-
-            if (!href || !label) return;
-
-            const normalized = label.toLowerCase();
-            const isKnownPlayer =
-                normalized.includes('watchmultiquality') ||
-                normalized === 'hubcloud' ||
-                normalized === 'watchnow' ||
-                normalized === 'dlbeta';
-
-            if (!isKnownPlayer) return;
-
+        for (const codedewUrl of codedewLinks) {
             try {
-                href = new URL(
-                    href,
-                    page.url || RAREANIMES_BASE
-                ).href;
-            } catch {
-                return;
-            }
-
-            if ((!href.startsWith('http://') && !href.startsWith('https://')) || seen.has(href)) {
-                return;
-            }
-
-            seen.add(href);
-
-            streams.push({
-                server: normalized.includes('watchmultiquality')
-                    ? 'Watch Quality'
-                    : label,
-                language: 'Default',
-                link: href,
-                type: 'player',
-                public: true
-            });
-        });
-
-        if (!argon) {
-            for (const stream of streams) {
-                argon = await fetchPublicCodedewArgon(
-                    stream.link,
-                    rawUrl
-                );
-
-                if (argon) break;
+                const sources = await extractCodedewPublicPlayerSources(codedewUrl, rawUrl);
+                for (const source of sources) {
+                    if (seen.has(source.link)) continue;
+                    seen.add(source.link);
+                    streams.push(source);
+                }
+            } catch (err) {
+                console.log('[RareAnimes] Codedew source extraction failed:', codedewUrl, err.message);
             }
         }
-
-        const finalStreams = argon
-            ? [argon, ...streams.filter(item => item.link !== argon.link)]
-            : streams;
 
         res.json({
             source: 'RareAnimes',
             title,
-            streams: finalStreams,
-            total_streams: finalStreams.length,
+            streams,
+            total_streams: streams.length,
             source_base: RAREANIMES_BASE,
-            player: argon ? 'Argon' : 'public-player-fallback',
-            argon_available: Boolean(argon)
+            player: streams.length ? 'public-player-source' : null,
+            public_player_sources_found: streams.length > 0,
+            codedew_pages_checked: codedewLinks.length
         });
     } catch (err) {
-        handleScraperError(
-            res,
-            err,
-            'Failed to load streams from RareAnimes'
-        );
+        handleScraperError(res, err, 'Failed to load public player URLs from RareAnimes');
     }
 });
+
 
 // Dedicated resolver for an actual public RareAnimes episode page.
 app.get('/rareanimes/argon', async (req, res) => {
