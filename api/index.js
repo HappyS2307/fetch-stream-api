@@ -770,7 +770,10 @@ const extractPublicArgonLinksFromHtml = (html, baseUrl = RAREANIMES_BASE) => {
         ];
 
         for (const value of attrs) {
-            if (value && /argon\\.razorshell\\.space\\/embed\\//i.test(value)) {
+            if (
+                value &&
+                String(value).toLowerCase().includes('argon.razorshell.space/embed/')
+            ) {
                 addCandidate(value);
             }
         }
