@@ -965,8 +965,7 @@ const loadRareAnimesEpisodeById = async (episodeId) => {
         const html = String(page.data || '');
         const $ = cheerio.load(html);
         const stream = extractRareAnimesArgonEmbed($, html);
-
-        if (!stream) return null;
+        const codedewLinks = extractRareAnimesCodedewLinksFromPage($, page.url || episodeUrl);
 
         const title =
             $('h1').first().text().replace(/\\s+/g, ' ').trim() ||
@@ -974,6 +973,7 @@ const loadRareAnimesEpisodeById = async (episodeId) => {
 
         return {
             stream,
+            codedewLinks,
             title,
             link: episodeUrl
         };
@@ -1014,7 +1014,7 @@ const loadRareAnimesSeason = async (season) => {
                         resolved.title ||
                         ('Episode ' + (item.e || fallbackNum)),
                     link: resolved.link,
-                    streams: [resolved.stream]
+                    streams: (resolved.codedewLinks || []).concat(resolved.stream ? [resolved.stream] : [])
                 };
             })
         );
