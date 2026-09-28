@@ -2887,10 +2887,16 @@ app.get('/rareanimes/streams', async (req, res) => {
 
         try {
             const parsed = new URL(rawUrl, RAREANIMES_BASE);
-            episodeId =
-                parsed.searchParams.get('url') ||
-                parsed.searchParams.get('episode') ||
-                parsed.searchParams.get('id');
+
+            // Only a RareAnimes URL parameter is a valid episode identity.
+            // Never treat arbitrary query parameters as an episode ID.
+            if (
+                (parsed.hostname === 'www.rareanimes.mov' ||
+                 parsed.hostname === 'rareanimes.mov') &&
+                parsed.searchParams.has('url')
+            ) {
+                episodeId = parsed.searchParams.get('url');
+            }
         } catch {}
 
         let title = null;
