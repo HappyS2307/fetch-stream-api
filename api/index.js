@@ -2458,8 +2458,8 @@ app.get('/rareanimes/episodes', async (req, res) => {
         const seasonEntries = Object.entries(relatedData)
             .filter(([, value]) =>
                 value &&
-                value.type === 'series' &&
-                Array.isArray(value.episodes)
+                Array.isArray(value.episodes) &&
+                value.episodes.some(item => item && item.id)
             )
             .sort((a, b) => {
                 const aNum =
