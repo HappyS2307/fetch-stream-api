@@ -2154,9 +2154,9 @@ app.get('/rareanimes/episodes', async (req, res) => {
         const normalizeAnimeName = (value) =>
             String(value || "")
                 .toLowerCase()
-                .replace(/season\\s*[- ]?\\d+/g, "")
+                .replace(/season\s*[- ]?\d+/g, "")
                 .replace(/[^a-z0-9]+/g, " ")
-                .replace(/\\s+/g, " ")
+                .replace(/\s+/g, " ")
                 .trim();
 
         const wantedName = normalizeAnimeName(requestedTitle);
