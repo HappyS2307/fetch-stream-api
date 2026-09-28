@@ -2227,22 +2227,30 @@ app.get('/rareanimes/episodes', async (req, res) => {
 
         const seenEpisodeIds = new Set();
         const seenEpisodeUrls = new Set();
+        let duplicateEpisodeId = null;
+        let duplicateEpisodeUrl = null;
 
         const episodes = selected.episodes
             .map((ep, index) => {
                 const epNum = Number(ep.e) || (index + 1);
-                const episodeId = String(ep.id).trim();
+                const episodeId = String(ep.id || "").trim();
 
                 const episodeUrl =
                     RAREANIMES_BASE +
                     "/?url=" +
                     encodeURIComponent(episodeId);
 
-                if (!episodeId || seenEpisodeIds.has(episodeId)) {
+                if (!episodeId) {
+                    return null;
+                }
+
+                if (seenEpisodeIds.has(episodeId)) {
+                    duplicateEpisodeId = episodeId;
                     return null;
                 }
 
                 if (seenEpisodeUrls.has(episodeUrl)) {
+                    duplicateEpisodeUrl = episodeUrl;
                     return null;
                 }
 
@@ -2267,6 +2275,15 @@ app.get('/rareanimes/episodes', async (req, res) => {
             .sort((a, b) =>
                 Number(a.epNum) - Number(b.epNum)
             );
+
+        if (duplicateEpisodeId || duplicateEpisodeUrl) {
+            return res.status(502).json({
+                source: "RareAnimes",
+                error: "Duplicate episode identity detected",
+                duplicate_episode_id: duplicateEpisodeId,
+                duplicate_episode_url: duplicateEpisodeUrl
+            });
+        }
 
         return res.json({
             source: "RareAnimes",
