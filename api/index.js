@@ -2769,8 +2769,10 @@ const extractCodedewPublicPlayerSources = async (codedewUrl, refererUrl = RAREAN
         .replace(/\\\//g, '/')
         .replace(/\\u0026/g, '&');
 
-    const argonPattern =
-        /https?:\\/\\/argon\\.razorshell\\.space\\/embed\\/[A-Za-z0-9_-]+/g;
+    const argonPattern = new RegExp(
+        'https?://argon\\\\.razorshell\\\\.space/embed/[A-Za-z0-9_-]+',
+        'g'
+    );
 
     for (const match of normalizedHtml.matchAll(argonPattern)) {
         addArgon(match[0]);
