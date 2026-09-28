@@ -2773,55 +2773,114 @@ app.get('/rareanimes/codedew-public-sources', async (req, res) => {
 
 app.get('/rareanimes/streams', async (req, res) => {
     const rawUrl = req.query.url;
-    if (!rawUrl) return res.status(400).json({ error: 'URL is required' });
+
+    if (!rawUrl) {
+        return res.status(400).json({ error: 'URL is required' });
+    }
+
     try {
-        const page = await fetchRareAnimesPage(rawUrl);
-        const html = String(page.data || '');
-        const $ = cheerio.load(html);
-        const title = $('h1').first().text().replace(/\s+/g, ' ').trim() || null;
-        const codedewLinks = [];
-        const seenCodedew = new Set();
+        // PRIMARY: resolve the exact RareAnimes episode page and extract
+        // the public Argon iframe exactly like the Naruto Shippuden case.
+        let episodeId = null;
 
-        $('a[href]').each((_, element) => {
-            const href = String($(element).attr('href') || '').trim();
-            if (!href) return;
-            try {
-                const absolute = new URL(href, page.url || RAREANIMES_BASE).href;
-                const parsed = new URL(absolute);
-                if (parsed.hostname.toLowerCase() !== 'codedew.com' || !parsed.pathname.toLowerCase().startsWith('/zipper/')) return;
-                if (seenCodedew.has(absolute)) return;
-                seenCodedew.add(absolute);
-                codedewLinks.push(absolute);
-            } catch {}
-        });
+        try {
+            const parsed = new URL(rawUrl, RAREANIMES_BASE);
+            episodeId =
+                parsed.searchParams.get('url') ||
+                parsed.searchParams.get('episode') ||
+                parsed.searchParams.get('id');
+        } catch {}
 
-        const streams = [];
-        const seen = new Set();
-        for (const codedewUrl of codedewLinks) {
-            try {
-                const sources = await extractCodedewPublicPlayerSources(codedewUrl, rawUrl);
-                for (const source of sources) {
-                    if (seen.has(source.link)) continue;
-                    seen.add(source.link);
-                    streams.push(source);
+        if (episodeId) {
+            const resolved = await loadRareAnimesEpisodeById(episodeId);
+
+            if (resolved?.stream?.link) {
+                return res.json({
+                    source: 'RareAnimes',
+                    title: resolved.title || null,
+                    streams: [{
+                        ...resolved.stream,
+                        via: 'RareAnimes episode HTML iframe'
+                    }],
+                    total_streams: 1,
+                    public_player_sources_found: true,
+                    player: 'Argon'
+                });
+            }
+
+            // Secondary: the same episode page may expose Codedew pages.
+            if (Array.isArray(resolved?.codedewLinks)) {
+                const streams = [];
+                const seen = new Set();
+
+                for (const codedew of resolved.codedewLinks) {
+                    try {
+                        const sources = await extractCodedewPublicPlayerSources(
+                            codedew.link || codedew,
+                            rawUrl
+                        );
+
+                        for (const source of sources) {
+                            if (seen.has(source.link)) continue;
+                            seen.add(source.link);
+                            streams.push(source);
+                        }
+                    } catch (err) {
+                        console.log(
+                            '[RareAnimes] Codedew fallback failed:',
+                            err.message
+                        );
+                    }
                 }
-            } catch (err) {
-                console.log('[RareAnimes] Codedew source extraction failed:', codedewUrl, err.message);
+
+                if (streams.length) {
+                    return res.json({
+                        source: 'RareAnimes',
+                        title: resolved.title || null,
+                        streams,
+                        total_streams: streams.length,
+                        public_player_sources_found: true,
+                        player: 'Codedew public playerSources'
+                    });
+                }
             }
         }
 
-        res.json({
+        // Fallback for a normal RareAnimes page URL.
+        const page = await fetchRareAnimesPage(rawUrl);
+        const html = String(page.data || '');
+        const $ = cheerio.load(html);
+
+        const directArgon = extractRareAnimesArgonEmbed($, html);
+
+        if (directArgon?.link) {
+            return res.json({
+                source: 'RareAnimes',
+                title: $('h1').first().text().replace(/\s+/g, ' ').trim() || null,
+                streams: [{
+                    ...directArgon,
+                    via: 'RareAnimes episode HTML iframe'
+                }],
+                total_streams: 1,
+                public_player_sources_found: true,
+                player: 'Argon'
+            });
+        }
+
+        return res.json({
             source: 'RareAnimes',
-            title,
-            streams,
-            total_streams: streams.length,
-            source_base: RAREANIMES_BASE,
-            player: streams.length ? 'public-player-source' : null,
-            public_player_sources_found: streams.length > 0,
-            codedew_pages_checked: codedewLinks.length
+            title: $('h1').first().text().replace(/\s+/g, ' ').trim() || null,
+            streams: [],
+            total_streams: 0,
+            public_player_sources_found: false,
+            message: 'No public player/embed URL was exposed on the RareAnimes episode page.'
         });
     } catch (err) {
-        handleScraperError(res, err, 'Failed to load public player URLs from RareAnimes');
+        handleScraperError(
+            res,
+            err,
+            'Failed to extract public RareAnimes player URL'
+        );
     }
 });
 
