@@ -497,8 +497,7 @@ const searchToonStream = async (query) => {
                             $(element).text().trim();
 
                         if (!title) {
-                            const parent = $(element).closest(                                'article, li, .bsx, .flw-item, .film_list-wrap'
-                            );
+                            const parent = $(element).closest(                                'article, li, .bsx, .flw-item, .film_list-wrap'                            );
 
                             title = parent
                                 .find(
@@ -997,8 +996,7 @@ const searchRareAnimes = async (query) => {
     /*
      * Cover the two common WordPress pagination forms. Duplicates are
      * removed, and the per-query cap below prevents unbounded crawling.     */
-    for (let page = 2; page <= 8; page++) {
-        addSearchUrl(
+    for (let page = 2; page <= 8; page++) {        addSearchUrl(
             RAREANIMES_BASE +
             "/?s=" +
             encoded +
@@ -1497,8 +1495,7 @@ app.get('/animesalt/streams', async (req, res) => {
 
         const $ = cheerio.load(response.data);        const base = response.finalBase;
 
-        const streamSources = [];
-        const downloadSources = [];
+        const streamSources = [];        const downloadSources = [];
 
         const title = $('h1').text().trim();
 
@@ -1997,8 +1994,7 @@ app.get('/toonstream/streams', async (req, res) => {
             let link = a.attr('href');
             if (!link) return;
 
-            try {
-                link = new URL(link, base).href;
+            try {                link = new URL(link, base).href;
             } catch {
                 return;
             }
@@ -2234,7 +2230,8 @@ app.get('/rareanimes/episodes', async (req, res) => {
          * episodeId/episodeUrl contract used by /rareanimes/streams.
          */
         const page = await fetchRareAnimesPage(rawUrl);
-        const parsed = getRareAnimesEpisodes(String(page.data || ""));
+        let currentHtml = String(page.data || "");
+        let parsed = getRareAnimesEpisodes(currentHtml);
         const requestedSeasonNum = Number(requestedSeason) || null;
 
         let selectedSeason = null;
@@ -2497,8 +2494,7 @@ app.get('/rareanimes/debug-links', async (req, res) => {
         const html = String(page.data || "");
         const $ = cheerio.load(html);
 
-        const hrefs = [];
-        const onclicks = [];
+        const hrefs = [];        const onclicks = [];
         const scripts = [];
 
         $('a[href]').each((i, el) => {
@@ -2997,8 +2993,7 @@ app.get('/tmdb/episode-thumbnail', async (req, res) => {
 
     } catch (err) {
         handleScraperError(
-            res,
-            err,
+            res,            err,
             "Failed to query TMDB API"
         );
     }
