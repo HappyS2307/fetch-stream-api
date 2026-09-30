@@ -316,17 +316,6 @@ const searchAnimeSalt = async (query) => {
 
                         if (!link || !title) return;
 
-                        const normalizedTitle = title
-                            .toLowerCase()
-                            .replace(/[^a-z0-9]+/g, ' ')
-                            .trim();
-
-                        if (
-                            queryTokens.length &&
-                            !queryTokens.every(token =>
-                                normalizedTitle.includes(token)
-                            )
-                        ) {
                         seen.add(link);
 
                         if (image && image.startsWith('//')) {
