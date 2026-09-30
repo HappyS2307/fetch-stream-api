@@ -291,17 +291,6 @@ const searchAnimeSalt = async (query) => {
                 const results = [];
                 const seen = new Set();
 
-                // AnimeSalt can return unrelated/latest items on some search
-                // routes. Keep only titles that actually match the query.
-                const normalizedQuery = String(query || '')
-                    .toLowerCase()
-                    .replace(/[^a-z0-9]+/g, ' ')
-                    .trim();
-
-                const queryTokens = normalizedQuery
-                    .split(/\\s+/)
-                    .filter(Boolean);
-
                 $('ul.post-lst li, article, .bsx, .flw-item').each(
                     (index, element) => {
                         const classText = $(element).attr('class') || '';
@@ -338,18 +327,6 @@ const searchAnimeSalt = async (query) => {
                                 normalizedTitle.includes(token)
                             )
                         ) {
-                            return;
-                        }
-
-                        try {
-                            link = new URL(link, finalBase).href;
-                        } catch {
-                            return;
-                        }
-
-                        link = fixUrl(link);
-
-                        if (seen.has(link)) return;
                         seen.add(link);
 
                         if (image && image.startsWith('//')) {
