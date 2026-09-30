@@ -2214,6 +2214,7 @@ app.get('/rareanimes/search', async (req, res) => {
 app.get('/rareanimes/episodes', async (req, res) => {
     const rawUrl = String(req.query.url || "").trim();
     const requestedSeason = String(req.query.season || "").trim();
+    const requestedTitle = String(req.query.title || "").trim();
 
     if (!rawUrl) {
         return res.status(400).json({ error: "URL is required" });
@@ -2284,6 +2285,171 @@ app.get('/rareanimes/episodes', async (req, res) => {
                 );
 
         let seasons = getSeasonEntries(relatedData);
+
+        /*
+         * Search-based recovery:
+         * The bot may hold a season article URL, while RareAnimes exposes
+         * the authoritative relatedData on an episode page. Use the exact
+         * anime title + requested season to locate the public season article,
+         * then recover ONE exact episode ID from that article and parse that
+         * episode page. No player/Argon scanning happens here.
+         */
+        if (
+            requestedTitle &&
+            requestedSeason &&
+            !seasons.some(
+                s =>
+                    String(s.seasonNum) ===
+                    requestedSeason
+            )
+        ) {
+            try {
+                const searchResults =
+                    await searchRareAnimes(
+                        requestedTitle +
+                        " Season " +
+                        requestedSeason
+                    );
+
+                const seasonPattern =
+                    new RegExp(
+                        "\\bseason\\s*[- ]?0*" +
+                        String(requestedSeason) +
+                        "\\b",
+                        "i"
+                    );
+
+                const exactSeason =
+                    searchResults.find(result =>
+                        seasonPattern.test(
+                            String(result.title || "")
+                        )
+                    );
+
+                if (exactSeason?.link) {
+                    const seasonPage =
+                        await fetchRareAnimesPage(
+                            exactSeason.link
+                        );
+
+                    const seasonHtml =
+                        String(
+                            seasonPage.data || ""
+                        );
+
+                    const seasonRelatedData =
+                        extractRareAnimesRelatedData(
+                            seasonHtml
+                        );
+
+                    const seasonPageSeasons =
+                        getSeasonEntries(
+                            seasonRelatedData
+                        );
+
+                    if (seasonPageSeasons.length) {
+                        html = seasonHtml;
+                        relatedData =
+                            seasonRelatedData;
+                        seasons =
+                            seasonPageSeasons;
+                    } else {
+                        const $season =
+                            cheerio.load(
+                                seasonHtml
+                            );
+
+                        const ids = [];
+                        const seen = new Set();
+
+                        $season(
+                            "a[href], [data-url], [data-href]"
+                        ).each((_, element) => {
+                            for (const attr of [
+                                "href",
+                                "data-url",
+                                "data-href"
+                            ]) {
+                                const value =
+                                    $season(element).attr(attr);
+
+                                if (!value) continue;
+
+                                try {
+                                    const parsed =
+                                        new URL(
+                                            value,
+                                            RAREANIMES_BASE
+                                        );
+
+                                    const id =
+                                        parsed.searchParams.get(
+                                            "url"
+                                        );
+
+                                    if (
+                                        id &&
+                                        !seen.has(id)
+                                    ) {
+                                        seen.add(id);
+                                        ids.push(id);
+                                    }
+                                } catch {}
+                            }
+                        });
+
+                        for (
+                            const episodeId of ids.slice(0, 3)
+                        ) {
+                            const episodePage =
+                                await fetchRareAnimesPage(
+                                    RAREANIMES_BASE +
+                                    "/?url=" +
+                                    encodeURIComponent(
+                                        episodeId
+                                    )
+                                );
+
+                            const episodeRelatedData =
+                                extractRareAnimesRelatedData(
+                                    String(
+                                        episodePage.data || ""
+                                    )
+                                );
+
+                            const episodeSeasons =
+                                getSeasonEntries(
+                                    episodeRelatedData
+                                );
+
+                            if (
+                                episodeSeasons.some(
+                                    season =>
+                                        String(
+                                            season.seasonNum
+                                        ) ===
+                                        requestedSeason
+                                )
+                            ) {
+                                html = String(
+                                    episodePage.data || ""
+                                );
+                                relatedData =
+                                    episodeRelatedData;
+                                seasons =
+                                    episodeSeasons;
+                                break;
+                            }
+                        }
+                    }
+                }
+            } catch (recoveryError) {
+                console.error(
+                    "[RareAnimes] season recovery failed:",
+                    recoveryError.message
+                );
+            }
+        }
 
         /*
          * If the supplied season/article page does not contain relatedData,
