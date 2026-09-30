@@ -2446,11 +2446,7 @@ app.get('/rareanimes/episodes', async (req, res) => {
         if (!hasRequestedSeason() && requestedTitle && requestedSeason) {
             try {
                 const searchResults =
-                    await searchRareAnimes(
-                        requestedTitle +
-                        " Season " +
-                        requestedSeason
-                    );
+                    await searchRareAnimes(requestedTitle);
 
                 const seasonPattern =
                     new RegExp(
