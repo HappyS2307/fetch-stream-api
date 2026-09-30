@@ -2221,17 +2221,24 @@ app.get('/rareanimes/episodes', async (req, res) => {
     }
 
     try {
-        /*
-         * RareAnimes verified structure:
-         * season/article page -> public episode URL -> exact episode page
-         * -> relatedData -> SEA_<season> -> exact episode IDs.
-         *
-         * The exact episode page is the authoritative catalog source.
-         */
-        let page = await fetchRareAnimesPage(rawUrl);
-        let html = String(page.data || "");
-        let relatedData = extractRareAnimesRelatedData(html);
+        const makeEpisodeUrl = id =>
+            RAREANIMES_BASE +
+            "/?url=" +
+            encodeURIComponent(String(id));
 
+        /*
+         * IMPORTANT:
+         * RareAnimes season/article pages do not always expose relatedData.
+         * The reliable public catalog is on an exact episode page.
+         *
+         * Therefore:
+         *   season/article page
+         *      -> recover one exact public episode ID
+         *      -> fetch that exact episode page
+         *      -> read relatedData / SEA_<season>
+         *
+         * No player/Argon extraction is performed here.
+         */
         const getSeasonEntries = data =>
             Object.entries(data || {})
                 .filter(([, group]) =>
@@ -2241,68 +2248,202 @@ app.get('/rareanimes/episodes', async (req, res) => {
                 )
                 .map(([key, group]) => {
                     const first =
-                        group.episodes.find(
-                            ep => ep && ep.id
-                        ) || {};
+                        group.episodes.find(ep => ep && ep.id) || {};
 
-                    const seasonMatch =
-                        String(
-                            group.title || key
-                        ).match(
-                            /season\s*[- ]?(\d+)/i
-                        );
+                    const keyMatch =
+                        String(key).match(/(?:SEA[_ -]?)?(\d+)/i);
+
+                    const titleMatch =
+                        String(group.title || group.name || "")
+                            .match(/season\s*[- ]?(\d+)/i);
 
                     const seasonNum =
                         Number(first.s) ||
-                        Number(seasonMatch?.[1]) ||
-                        Number(
-                            String(key)
-                                .replace(/^SEA_/i, "")
-                                .match(/\d+/)?.[0]
-                        );
+                        Number(titleMatch?.[1]) ||
+                        Number(keyMatch?.[1]);
 
                     return {
                         seasonKey: key,
                         seasonNum,
                         name:
                             group.title ||
-                            ("Season " + seasonNum),
-                        poster:
-                            group.poster || null,
-                        episodes:
-                            group.episodes.filter(
-                                ep => ep && ep.id
-                            )
+                            group.name ||
+                            (seasonNum ? "Season " + seasonNum : key),
+                        poster: group.poster || null,
+                        episodes: group.episodes.filter(
+                            ep => ep && ep.id
+                        )
                     };
                 })
-                .filter(
-                    item =>
-                        Number.isFinite(item.seasonNum)
-                )
-                .sort(
-                    (a, b) =>
-                        a.seasonNum - b.seasonNum
-                );
-
-        let seasons = getSeasonEntries(relatedData);
+                .filter(entry => Number.isFinite(entry.seasonNum))
+                .sort((a, b) => a.seasonNum - b.seasonNum);
 
         /*
-         * Search-based recovery:
-         * The bot may hold a season article URL, while RareAnimes exposes
-         * the authoritative relatedData on an episode page. Use the exact
-         * anime title + requested season to locate the public season article,
-         * then recover ONE exact episode ID from that article and parse that
-         * episode page. No player/Argon scanning happens here.
+         * Recover public episode IDs from the supplied page.
+         * RareAnimes has used href/data attributes, onclick handlers and
+         * inline JS for these links. Decode common HTML/JS escaping first.
          */
-        if (
-            requestedTitle &&
+        const extractEpisodeIds = html => {
+            const source = String(html || "");
+            const decoded = source
+                .replace(/&amp;/gi, "&")
+                .replace(/\\u0026/gi, "&")
+                .replace(/\\u002F/gi, "/")
+                .replace(/\\\//g, "/")
+                .replace(/%3F/gi, "?")
+                .replace(/%3D/gi, "=")
+                .replace(/%26/gi, "&");
+
+            const ids = [];
+            const seen = new Set();
+
+            const add = value => {
+                const id = String(value || "").trim();
+                if (
+                    !id ||
+                    seen.has(id) ||
+                    !/^[A-Za-z0-9_-]{5,100}$/.test(id)
+                ) {
+                    return;
+                }
+                seen.add(id);
+                ids.push(id);
+            };
+
+            const $ = cheerio.load(source);
+
+            $("a[href], [data-url], [data-href], [onclick]").each(
+                (_, element) => {
+                    for (const attr of [
+                        "href",
+                        "data-url",
+                        "data-href",
+                        "onclick"
+                    ]) {
+                        const value = String(
+                            $(element).attr(attr) || ""
+                        );
+                        if (!value) continue;
+
+                        const decodedValue = value
+                            .replace(/&amp;/gi, "&")
+                            .replace(/\\u0026/gi, "&")
+                            .replace(/\\\//g, "/")
+                            .replace(/%3F/gi, "?")
+                            .replace(/%3D/gi, "=")
+                            .replace(/%26/gi, "&");
+
+                        try {
+                            const absolute = new URL(
+                                decodedValue,
+                                RAREANIMES_BASE
+                            );
+                            add(
+                                absolute.searchParams.get("url")
+                            );
+                        } catch {}
+
+                        const matches =
+                            decodedValue.matchAll(
+                                /[?&]url(?:=|%3D)([A-Za-z0-9_-]{5,100})/gi
+                            );
+
+                        for (const match of matches) {
+                            add(match[1]);
+                        }
+                    }
+                }
+            );
+
+            /*
+             * Inline JS fallback. Only accept explicit public episode URL
+             * parameters or known episode-id variables; never arbitrary URLs.
+             */
+            const patterns = [
+                /[?&]url(?:=|%3D)([A-Za-z0-9_-]{5,100})/gi,
+                /(?:const|let|var)\s+(?:fid|episodeId|episode_id)\s*=\s*["']([A-Za-z0-9_-]{5,100})["']/gi,
+                /(?:nextUrl|episodeUrl)\s*=\s*["'][^"']*[?&]url=([A-Za-z0-9_-]{5,100})/gi
+            ];
+
+            for (const pattern of patterns) {
+                for (const match of decoded.matchAll(pattern)) {
+                    add(match[1]);
+                }
+            }
+
+            return ids;
+        };
+
+        let page = await fetchRareAnimesPage(rawUrl);
+        let html = String(page.data || "");
+        let relatedData = extractRareAnimesRelatedData(html);
+        let seasons = getSeasonEntries(relatedData);
+
+        const hasRequestedSeason = () =>
             requestedSeason &&
-            !seasons.some(
-                s =>
-                    String(s.seasonNum) ===
-                    requestedSeason
-            )
-        ) {
+            seasons.some(
+                season =>
+                    String(season.seasonNum) === requestedSeason
+            );
+
+        /*
+         * First recovery: use an exact episode link already exposed by the
+         * selected season/article page. This avoids depending on the search
+         * endpoint and avoids accidentally selecting another season.
+         */
+        if (!hasRequestedSeason()) {
+            const candidateIds = extractEpisodeIds(html);
+
+            for (const episodeId of candidateIds.slice(0, 8)) {
+                try {
+                    const episodePage =
+                        await fetchRareAnimesPage(
+                            makeEpisodeUrl(episodeId)
+                        );
+
+                    const episodeHtml =
+                        String(episodePage.data || "");
+
+                    const episodeRelatedData =
+                        extractRareAnimesRelatedData(
+                            episodeHtml
+                        );
+
+                    const episodeSeasons =
+                        getSeasonEntries(
+                            episodeRelatedData
+                        );
+
+                    if (
+                        !requestedSeason ||
+                        episodeSeasons.some(
+                            season =>
+                                String(season.seasonNum) ===
+                                requestedSeason
+                        )
+                    ) {
+                        page = episodePage;
+                        html = episodeHtml;
+                        relatedData = episodeRelatedData;
+                        seasons = episodeSeasons;
+                        break;
+                    }
+                } catch (error) {
+                    console.error(
+                        "[RareAnimes] episode catalog recovery failed:",
+                        error.message
+                    );
+                }
+            }
+        }
+
+        /*
+         * Second recovery: if the supplied URL did not expose an episode
+         * link, search by the explicit anime title + requested season.
+         * Search is only a locator; the final catalog still comes from one
+         * exact public episode page.
+         */
+        if (!hasRequestedSeason() && requestedTitle && requestedSeason) {
             try {
                 const searchResults =
                     await searchRareAnimes(
@@ -2333,9 +2474,7 @@ app.get('/rareanimes/episodes', async (req, res) => {
                         );
 
                     const seasonHtml =
-                        String(
-                            seasonPage.data || ""
-                        );
+                        String(seasonPage.data || "");
 
                     const seasonRelatedData =
                         extractRareAnimesRelatedData(
@@ -2348,73 +2487,28 @@ app.get('/rareanimes/episodes', async (req, res) => {
                         );
 
                     if (seasonPageSeasons.length) {
+                        page = seasonPage;
                         html = seasonHtml;
-                        relatedData =
-                            seasonRelatedData;
-                        seasons =
-                            seasonPageSeasons;
+                        relatedData = seasonRelatedData;
+                        seasons = seasonPageSeasons;
                     } else {
-                        const $season =
-                            cheerio.load(
-                                seasonHtml
-                            );
+                        const ids =
+                            extractEpisodeIds(seasonHtml);
 
-                        const ids = [];
-                        const seen = new Set();
-
-                        $season(
-                            "a[href], [data-url], [data-href]"
-                        ).each((_, element) => {
-                            for (const attr of [
-                                "href",
-                                "data-url",
-                                "data-href"
-                            ]) {
-                                const value =
-                                    $season(element).attr(attr);
-
-                                if (!value) continue;
-
-                                try {
-                                    const parsed =
-                                        new URL(
-                                            value,
-                                            RAREANIMES_BASE
-                                        );
-
-                                    const id =
-                                        parsed.searchParams.get(
-                                            "url"
-                                        );
-
-                                    if (
-                                        id &&
-                                        !seen.has(id)
-                                    ) {
-                                        seen.add(id);
-                                        ids.push(id);
-                                    }
-                                } catch {}
-                            }
-                        });
-
-                        for (
-                            const episodeId of ids.slice(0, 3)
-                        ) {
+                        for (const episodeId of ids.slice(0, 8)) {
                             const episodePage =
                                 await fetchRareAnimesPage(
-                                    RAREANIMES_BASE +
-                                    "/?url=" +
-                                    encodeURIComponent(
-                                        episodeId
-                                    )
+                                    makeEpisodeUrl(episodeId)
+                                );
+
+                            const episodeHtml =
+                                String(
+                                    episodePage.data || ""
                                 );
 
                             const episodeRelatedData =
                                 extractRareAnimesRelatedData(
-                                    String(
-                                        episodePage.data || ""
-                                    )
+                                    episodeHtml
                                 );
 
                             const episodeSeasons =
@@ -2427,13 +2521,11 @@ app.get('/rareanimes/episodes', async (req, res) => {
                                     season =>
                                         String(
                                             season.seasonNum
-                                        ) ===
-                                        requestedSeason
+                                        ) === requestedSeason
                                 )
                             ) {
-                                html = String(
-                                    episodePage.data || ""
-                                );
+                                page = episodePage;
+                                html = episodeHtml;
                                 relatedData =
                                     episodeRelatedData;
                                 seasons =
@@ -2443,143 +2535,11 @@ app.get('/rareanimes/episodes', async (req, res) => {
                         }
                     }
                 }
-            } catch (recoveryError) {
+            } catch (error) {
                 console.error(
-                    "[RareAnimes] season recovery failed:",
-                    recoveryError.message
+                    "[RareAnimes] search recovery failed:",
+                    error.message
                 );
-            }
-        }
-
-        /*
-         * If the supplied season/article page does not contain relatedData,
-         * find ONE public episode ID from that exact page and fetch that
-         * exact episode page. We do not scan other seasons or players.
-         */
-        if (
-            requestedSeason &&
-            !seasons.some(
-                s =>
-                    String(s.seasonNum) ===
-                    requestedSeason
-            )
-        ) {
-            const candidateIds = [];
-            const seenIds = new Set();
-
-            const addId = value => {
-                const id = String(value || "").trim();
-
-                if (
-                    !id ||
-                    seenIds.has(id) ||
-                    !/^[A-Za-z0-9_-]+$/.test(id)
-                ) {
-                    return;
-                }
-
-                seenIds.add(id);
-                candidateIds.push(id);
-            };
-
-            const $ = cheerio.load(html);
-
-            $("a[href], [data-url], [data-href]").each(
-                (index, element) => {
-                    for (const attr of [
-                        "href",
-                        "data-url",
-                        "data-href"
-                    ]) {
-                        const value =
-                            $(element).attr(attr);
-
-                        if (!value) continue;
-
-                        try {
-                            const absolute =
-                                new URL(
-                                    value,
-                                    RAREANIMES_BASE
-                                );
-
-                            addId(
-                                absolute.searchParams.get(
-                                    "url"
-                                )
-                            );
-                        } catch {}
-                    }
-                }
-            );
-
-            /*
-             * RareAnimes also exposes the next exact episode in inline JS:
-             * const nextUrl = "?url=<episode-id>"
-             * and the current episode as:
-             * const fid = "<episode-id>"
-             */
-            for (const pattern of [
-                /nextUrl\s*=\s*["'][^"']*?[?&]url=([A-Za-z0-9_-]+)/i,
-                /(?:const|let|var)\s+fid\s*=\s*["']([A-Za-z0-9_-]+)["']/i,
-                /[?&]url=([A-Za-z0-9_-]+)/gi
-            ]) {
-                const matches =
-                    html.matchAll(pattern);
-
-                for (const match of matches) {
-                    addId(match[1]);
-                }
-            }
-
-            /*
-             * Only the first exact public episode page is needed to recover
-             * the authoritative relatedData catalog.
-             */
-            for (const episodeId of candidateIds.slice(0, 3)) {
-                const episodeUrl =
-                    RAREANIMES_BASE +
-                    "/?url=" +
-                    encodeURIComponent(
-                        episodeId
-                    );
-
-                try {
-                    const episodePage =
-                        await fetchRareAnimesPage(
-                            episodeUrl
-                        );
-
-                    const episodeRelatedData =
-                        extractRareAnimesRelatedData(
-                            String(
-                                episodePage.data || ""
-                            )
-                        );
-
-                    const episodeSeasons =
-                        getSeasonEntries(
-                            episodeRelatedData
-                        );
-
-                    if (
-                        episodeSeasons.some(
-                            s =>
-                                String(s.seasonNum) ===
-                                requestedSeason
-                        )
-                    ) {
-                        page = episodePage;
-                        html = String(
-                            episodePage.data || ""
-                        );
-                        relatedData =
-                            episodeRelatedData;
-                        seasons =
-                            episodeSeasons;
-                        break;
-                    }
-                } catch {}
             }
         }
 
@@ -2597,23 +2557,19 @@ app.get('/rareanimes/episodes', async (req, res) => {
             return res.json({
                 source: "RareAnimes",
                 requested_url: rawUrl,
-                requested_season:
-                    requestedSeason || null,
+                requested_title: requestedTitle || null,
+                requested_season: requestedSeason || null,
                 seasons: seasons.map(season => ({
-                    seasonKey:
-                        season.seasonKey,
-                    seasonNum:
-                        String(season.seasonNum),
+                    seasonKey: season.seasonKey,
+                    seasonNum: String(season.seasonNum),
                     name: season.name,
-                    episodeCount:
-                        season.episodes.length
+                    episodeCount: season.episodes.length
                 })),
                 episodes: [],
                 mapped_episodes: 0,
-                source_base:
-                    RAREANIMES_BASE,
+                source_base: RAREANIMES_BASE,
                 mapping:
-                    "season page -> exact episode page -> relatedData -> requested season not found"
+                    "season/article -> exact public episode page -> relatedData -> requested season"
             });
         }
 
@@ -2623,45 +2579,30 @@ app.get('/rareanimes/episodes', async (req, res) => {
             selectedSeason.episodes
                 .map((ep, index) => {
                     const episodeId =
-                        String(
-                            ep.id || ""
-                        ).trim();
+                        String(ep.id || "").trim();
 
                     if (
                         !episodeId ||
-                        seenEpisodeIds.has(
-                            episodeId
-                        )
+                        seenEpisodeIds.has(episodeId)
                     ) {
                         return null;
                     }
 
-                    seenEpisodeIds.add(
-                        episodeId
-                    );
+                    seenEpisodeIds.add(episodeId);
 
                     const epNum =
-                        Number(ep.e) ||
-                        index + 1;
-
-                    const episodeUrl =
-                        RAREANIMES_BASE +
-                        "/?url=" +
-                        encodeURIComponent(
-                            episodeId
-                        );
+                        Number(ep.e) || index + 1;
 
                     return {
-                        epNum:
-                            String(epNum),
+                        epNum: String(epNum),
                         title:
                             ep.ep_name ||
-                            ("Episode " +
-                                epNum),
+                            ("Episode " + epNum),
                         episodeId,
-                        episodeUrl,
+                        episodeUrl:
+                            makeEpisodeUrl(episodeId),
                         link:
-                            episodeUrl,
+                            makeEpisodeUrl(episodeId),
                         image:
                             ep.img ||
                             selectedSeason.poster ||
@@ -2678,33 +2619,24 @@ app.get('/rareanimes/episodes', async (req, res) => {
         return res.json({
             source: "RareAnimes",
             requested_url: rawUrl,
-            requested_season:
-                requestedSeason || null,
+            requested_title: requestedTitle || null,
+            requested_season: requestedSeason || null,
             selected_season:
-                String(
-                    selectedSeason.seasonNum
-                ),
+                String(selectedSeason.seasonNum),
             selected_season_key:
                 selectedSeason.seasonKey,
             seasons:
                 seasons.map(season => ({
-                    seasonKey:
-                        season.seasonKey,
-                    seasonNum:
-                        String(
-                            season.seasonNum
-                        ),
+                    seasonKey: season.seasonKey,
+                    seasonNum: String(season.seasonNum),
                     name: season.name,
-                    episodeCount:
-                        season.episodes.length
+                    episodeCount: season.episodes.length
                 })),
             episodes,
-            mapped_episodes:
-                episodes.length,
-            source_base:
-                RAREANIMES_BASE,
+            mapped_episodes: episodes.length,
+            source_base: RAREANIMES_BASE,
             mapping:
-                "exact season page -> exact public episode page -> relatedData -> exact episode IDs"
+                "exact public episode page -> relatedData -> exact requested season -> exact episode IDs"
         });
     } catch (err) {
         console.error(
