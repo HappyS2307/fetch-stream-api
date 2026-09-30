@@ -337,7 +337,7 @@ const searchAnimeSalt = async (query) => {
                 );
 
                 if (results.length) {
-                    return results.slice(0, 30);
+                    return results;
                 }
             } catch (err) {
                 console.error(
@@ -531,7 +531,7 @@ const searchToonStream = async (query) => {
                 }
 
                 if (results.length) {
-                    return results.slice(0, 30);
+                    return results;
                 }
             } catch (err) {
                 console.error(
