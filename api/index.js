@@ -256,23 +256,225 @@ const detectType = (link, classText) => {
 // 1. EXTRACTOR HELPER LOGICS
 // ==========================================
 
-const searchAnimeSalt = async (query) => {
-    const searchPaths = [
-        `/?s=${encodeURIComponent(query)}`,
-        `/search/?s=${encodeURIComponent(query)}`,
-        `/s?q=${encodeURIComponent(query)}`
+
+const normalizeSearchText = (value) =>
+    String(value || '')
+        .toLowerCase()
+        .replace(/&amp;/g, '&')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+const slugifySearchQuery = (value) =>
+    normalizeSearchText(value)
+        .split(' ')
+        .filter(Boolean)
+        .join('-');
+
+const isContentUrl = (url) => {
+    const lower = String(url || '').toLowerCase();
+    return lower.includes('/series/') ||
+        lower.includes('/movies/') ||
+        lower.includes('/anime/') ||
+        lower.includes('/show/') ||
+        lower.includes('/watch/');
+};
+
+const extractSearchTitle = ($, element, link, finalBase) => {
+    const anchor = $(element);
+    let title =
+        anchor.attr('title')?.trim() ||
+        anchor.find('img').first().attr('alt')?.trim() ||
+        anchor.text().trim();
+
+    if (!title) {
+        const parent = anchor.closest(
+            'article, li, .bsx, .flw-item, .c-tabs-item__content, .film_list-wrap, .item'
+        );
+        title = parent.find(
+            '.entry-title, h1, h2, h3, h4, h5, .title, .film-name, .film-name a'
+        ).first().text().trim() || '';
+    }
+
+    if (!title) {
+        try {
+            const pathname = new URL(link, finalBase).pathname;
+            const slug = pathname.split('/').filter(Boolean).pop() || '';
+            title = decodeURIComponent(slug)
+                .replace(/[-_]+/g, ' ')
+                .replace(/\b\w/g, function(char) { return char.toUpperCase(); });
+        } catch {}
+    }
+
+    return title.replace(/\s+/g, ' ').trim();
+};
+
+const extractSearchImage = ($, element, finalBase) => {
+    let image =
+        $(element).find('img').first().attr('data-src') ||
+        $(element).find('img').first().attr('data-lazy-src') ||
+        $(element).find('img').first().attr('data-original') ||
+        $(element).find('img').first().attr('src') ||
+        null;
+
+    if (!image) return null;
+
+    try {
+        return new URL(
+            image.startsWith('//') ? 'https:' + image : image,
+            finalBase
+        ).href;
+    } catch {
+        return image;
+    }
+};
+
+const scoreSearchResult = (query, title, link) => {
+    const q = normalizeSearchText(query);
+    const t = normalizeSearchText(title);
+    const slug = normalizeSearchText(
+        String(link || '').split('/').filter(Boolean).pop() || ''
+    );
+
+    if (!q || !t) return 0;
+
+    const qTokens = [...new Set(q.split(' ').filter(Boolean))];
+    const tTokens = new Set((t + ' ' + slug).split(' ').filter(Boolean));
+
+    let score = 0;
+    if (t === q) score += 1000;
+    if (t.includes(q)) score += 500;
+    if (slug === q.replace(/\s+/g, '-')) score += 450;
+
+    for (const token of qTokens) {
+        if (tTokens.has(token)) score += 100;
+        else if ([...tTokens].some(function(value) { return value.includes(token); })) score += 40;
+    }
+
+    return score;
+};
+
+const parseSearchResults = (data, query, finalBase, source) => {
+    const $ = cheerio.load(data);
+    const results = [];
+    const seen = new Set();
+
+    $('a[href]').each((index, element) => {
+        let href = $(element).attr('href');
+        if (!href) return;
+
+        let link;
+        try {
+            link = fixUrl(new URL(href, finalBase).href);
+        } catch {
+            return;
+        }
+
+        if (!isContentUrl(link) || seen.has(link)) return;
+
+        const title = extractSearchTitle($, element, link, finalBase);
+        if (!title || title.length < 2) return;
+
+        const score = scoreSearchResult(query, title, link);
+        if (score <= 0) return;
+
+        seen.add(link);
+
+        const classText = $(element).closest('[class]').attr('class') || '';
+
+        results.push({
+            title,
+            link,
+            image: extractSearchImage($, element, finalBase),
+            type: detectType(link, classText),
+            source,
+            _score: score
+        });
+    });
+
+    results.sort(function(a, b) { return b._score - a._score; });
+    return results.map(function(item) {
+        const copy = Object.assign({}, item);
+        delete copy._score;
+        return copy;
+    });
+};
+
+const directSearchBySlug = async (query, bases, source) => {
+    const slug = slugifySearchQuery(query);
+    if (!slug) return [];
+
+    const paths = [
+        '/series/' + slug + '/',
+        '/movies/' + slug + '/',
+        '/' + slug + '/'
     ];
 
-    const bases = ANIMESALT_BASES;
+    for (const base of bases) {
+        for (const path of paths) {
+            const url = base + path;
+
+            try {
+                const response = await axios.get(url, {
+                    headers: getHeaders(base),
+                    timeout: 10000,
+                    maxRedirects: 5,
+                    validateStatus: function(status) {
+                        return status >= 200 && status < 400;
+                    }
+                });
+
+                const finalBase = getFinalBase(response, base);
+                const $ = cheerio.load(response.data);
+
+                const heading =
+                    $('h1').first().text().trim() ||
+                    $('title').first().text().trim();
+
+                const looksValid =
+                    response.status >= 200 &&
+                    response.status < 400 &&
+                    (isContentUrl(url) || $('h1, .entry-title, .film-name').length > 0);
+
+                if (!looksValid) continue;
+
+                const link = fixUrl(new URL(path, finalBase).href);
+
+                return [{
+                    title: heading.replace(/\s+/g, ' ').trim() || query,
+                    link,
+                    image: extractSearchImage($, $('body').first(), finalBase),
+                    type: detectType(link, ''),
+                    source
+                }];
+            } catch {}
+        }
+    }
+
+    return [];
+};
+
+
+const searchAnimeSalt = async (query) => {
+    const searchPaths = [
+        '/?s=' + encodeURIComponent(query),
+        '/search/?s=' + encodeURIComponent(query),
+        '/s?q=' + encodeURIComponent(query),
+        '/search/' + encodeURIComponent(slugifySearchQuery(query)),
+        '/search/' + encodeURIComponent(slugifySearchQuery(query)) + '/'
+    ];
+
     const preferred = await getWorkingBase('animesalt');
     const orderedBases = [
         ...(preferred ? [preferred] : []),
-        ...bases
+        ...ANIMESALT_BASES
     ].filter((base, index, arr) => arr.indexOf(base) === index);
+
+    let bestResults = [];
 
     for (const base of orderedBases) {
         for (const path of searchPaths) {
-            const searchUrl = `${base}${path}`;
+            const searchUrl = base + path;
 
             try {
                 const response = await axios.get(searchUrl, {
@@ -281,90 +483,41 @@ const searchAnimeSalt = async (query) => {
                     maxRedirects: 5
                 });
 
-                const data = response.data;
                 const finalBase = getFinalBase(response, base);
-
                 ACTIVE_ANIMESALT_BASE = finalBase;
                 ACTIVE_ANIMESALT_AT = Date.now();
 
-                const $ = cheerio.load(data);
-                const results = [];
-                const seen = new Set();
-
-                $('ul.post-lst li, article, .bsx, .flw-item').each(
-                    (index, element) => {
-                        const classText = $(element).attr('class') || '';
-
-                        const title =
-                            $(element)
-                                .find(
-                                    'h2.entry-title, h3.entry-title, h2, h3, h4, .title, .film-name, .entry-title'
-                                )
-                                .first()
-                                .text()
-                                .trim();
-
-                        let link =
-                            $(element).find('a.lnk-blk').attr('href') ||
-                            $(element).find('a[href*="/series/"]').first().attr('href') ||
-                            $(element).find('a[href*="/movies/"]').first().attr('href') ||
-                            $(element).find('a[href]').first().attr('href');
-
-                        let image =
-                            $(element).find('img').attr('data-src') ||
-                            $(element).find('img').attr('src');
-
-                        if (!link || !title) return;
-
-                        try {
-                            link = new URL(link, finalBase).href;
-                        } catch {
-                            return;
-                        }
-
-                        link = fixUrl(link);
-
-                        if (seen.has(link)) return;
-                        seen.add(link);
-
-                        if (image && image.startsWith('//')) {
-                            image = 'https:' + image;
-                        } else if (image) {
-                            try {
-                                image = new URL(image, finalBase).href;
-                            } catch {}
-                        }
-
-                        results.push({
-                            title,
-                            link,
-                            image: image || null,
-                            type: detectType(link, classText),
-                            source: 'AnimeSalt'
-                        });
-                    }
+                const results = parseSearchResults(
+                    response.data, query, finalBase, 'AnimeSalt'
                 );
 
-                if (results.length) {
+                if (results.length > bestResults.length) bestResults = results;
+
+                if (results.length &&
+                    normalizeSearchText(results[0].title) === normalizeSearchText(query)) {
                     return results.slice(0, 30);
                 }
             } catch (err) {
-                console.error(
-                    `[AnimeSalt] Search failed for ${searchUrl}:`,
-                    err.message
-                );
+                console.error('[AnimeSalt] Search failed for ' + searchUrl + ':', err.message);
             }
         }
+
+        if (bestResults.length) return bestResults.slice(0, 30);
     }
 
-    return [];
+    return (await directSearchBySlug(
+        query, orderedBases, 'AnimeSalt'
+    )).slice(0, 30);
 };
+
 
 const searchToonStream = async (query) => {
     const searchPaths = [
-        `/s?q=${encodeURIComponent(query)}`,
-        `/?s=${encodeURIComponent(query)}`,
-        `/search/?s=${encodeURIComponent(query)}`
+        '/s?q=' + encodeURIComponent(query),
+        '/?s=' + encodeURIComponent(query),
+        '/search/?s=' + encodeURIComponent(query),
+        '/search/' + encodeURIComponent(slugifySearchQuery(query)),
+        '/search/' + encodeURIComponent(slugifySearchQuery(query)) + '/'
     ];
 
     const preferred = await getWorkingBase('toonstream');
@@ -373,9 +526,11 @@ const searchToonStream = async (query) => {
         ...TOONSTREAM_BASES
     ].filter((base, index, arr) => arr.indexOf(base) === index);
 
+    let bestResults = [];
+
     for (const base of orderedBases) {
         for (const path of searchPaths) {
-            const searchUrl = `${base}${path}`;
+            const searchUrl = base + path;
 
             try {
                 const response = await axios.get(searchUrl, {
@@ -384,176 +539,31 @@ const searchToonStream = async (query) => {
                     maxRedirects: 5
                 });
 
-                const data = response.data;
                 const finalBase = getFinalBase(response, base);
-
                 ACTIVE_TOONSTREAM_BASE = finalBase;
                 ACTIVE_TOONSTREAM_AT = Date.now();
 
-                const $ = cheerio.load(data);
-                const results = [];
-                const seen = new Set();
+                const results = parseSearchResults(
+                    response.data, query, finalBase, 'ToonStream'
+                );
 
-                $(
-                    'ul.post-lst li, article, .bsx, .flw-item, .film_list-wrap .flw-item, .c-tabs-item__content'
-                ).each((index, element) => {
-                    const classText = $(element).attr('class') || '';
+                if (results.length > bestResults.length) bestResults = results;
 
-                    let link =
-                        $(element).find('a.lnk-blk').attr('href') ||
-                        $(element).find('a[href*="/series/"]').first().attr('href') ||
-                        $(element).find('a[href*="/movies/"]').first().attr('href') ||
-                        $(element).find('a[href]').first().attr('href');
-
-                    let title =
-                        $(element)
-                            .find(
-                                'h2.entry-title, h3.entry-title, h2, h3, h4, .title, .film-name, .film-name a, .entry-title'
-                            )
-                            .first()
-                            .text()
-                            .trim();
-
-                    if (!title && link) {
-                        title =
-                            $(element)
-                                .find('a[title]')
-                                .first()
-                                .attr('title') || '';
-                    }
-
-                    let image =
-                        $(element).find('img').attr('data-src') ||
-                        $(element).find('img').attr('data-lazy-src') ||
-                        $(element).find('img').attr('src');
-
-                    if (!link || !title) return;
-
-                    try {
-                        link = new URL(link, finalBase).href;
-                    } catch {
-                        return;
-                    }
-
-                    link = fixUrl(link);
-
-                    const lowerLink = link.toLowerCase();
-
-                    const looksLikeContent =
-                        lowerLink.includes('/series/') ||
-                        lowerLink.includes('/movies/') ||
-                        lowerLink.includes('/anime/') ||
-                        lowerLink.includes('/show/') ||
-                        lowerLink.includes('/watch/');
-
-                    if (!looksLikeContent || seen.has(link)) return;
-
-                    seen.add(link);
-
-                    if (image && image.startsWith('//')) {
-                        image = 'https:' + image;
-                    } else if (image) {
-                        try {
-                            image = new URL(image, finalBase).href;
-                        } catch {}
-                    }
-
-                    results.push({
-                        title,
-                        link,
-                        image: image || null,
-                        type: detectType(link, classText),
-                        source: 'ToonStream'
-                    });
-                });
-
-                if (!results.length) {
-                    $('a[href]').each((index, element) => {
-                        let link = $(element).attr('href');
-                        if (!link) return;
-
-                        try {
-                            link = new URL(link, finalBase).href;
-                        } catch {
-                            return;
-                        }
-
-                        link = fixUrl(link);
-
-                        const lowerLink = link.toLowerCase();
-
-                        const looksLikeContent =
-                            lowerLink.includes('/series/') ||
-                            lowerLink.includes('/movies/') ||
-                            lowerLink.includes('/anime/') ||
-                            lowerLink.includes('/show/') ||
-                            lowerLink.includes('/watch/');
-
-                        if (!looksLikeContent || seen.has(link)) return;
-
-                        let title =
-                            $(element).attr('title')?.trim() ||
-                            $(element).find('img').attr('alt')?.trim() ||
-                            $(element).text().trim();
-
-                        if (!title) {
-                            const parent = $(element).closest(
-                                'article, li, .bsx, .flw-item, .film_list-wrap'
-                            );
-
-                            title = parent
-                                .find(
-                                    'h2, h3, h4, .title, .film-name, .entry-title'
-                                )
-                                .first()
-                                .text()
-                                .trim();
-                        }
-
-                        if (!title || title.length < 2) return;
-
-                        seen.add(link);
-
-                        let image =
-                            $(element).find('img').attr('data-src') ||
-                            $(element).find('img').attr('data-lazy-src') ||
-                            $(element).find('img').attr('src') ||
-                            null;
-
-                        if (image && image.startsWith('//')) {
-                            image = 'https:' + image;
-                        } else if (image) {
-                            try {
-                                image = new URL(image, finalBase).href;
-                            } catch {}
-                        }
-
-                        results.push({
-                            title,
-                            link,
-                            image,
-                            type: detectType(
-                                link,
-                                $(element).closest('[class]').attr('class') || ''
-                            ),
-                            source: 'ToonStream'
-                        });
-                    });
-                }
-
-                if (results.length) {
+                if (results.length &&
+                    normalizeSearchText(results[0].title) === normalizeSearchText(query)) {
                     return results.slice(0, 30);
                 }
             } catch (err) {
-                console.error(
-                    `[ToonStream] Search failed for ${searchUrl}:`,
-                    err.message
-                );
+                console.error('[ToonStream] Search failed for ' + searchUrl + ':', err.message);
             }
         }
+
+        if (bestResults.length) return bestResults.slice(0, 30);
     }
 
-    return [];
+    return (await directSearchBySlug(
+        query, orderedBases, 'ToonStream'
+    )).slice(0, 30);
 };
 
 // ==========================================
